@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from odmr.benchmark_config import BenchmarkConfig, get_search_regions, get_width_candidates, with_overrides
+
 
 def peak_from_dip(y_dip: np.ndarray) -> np.ndarray:
     """Convert dip-form ODMR data into peak-form."""
-    return 1.0 - y_dip
+    return 1.0 - np.asarray(y_dip, dtype=float)
 
 
 def lorentzian_peak(
@@ -14,7 +16,7 @@ def lorentzian_peak(
     gamma: float,
     height: float,
 ) -> np.ndarray:
-    """Lorentzian peak with gamma interpreted as HWHM-like width."""
+    """Lorentzian peak with gamma interpreted as a width parameter."""
     return height / (1.0 + ((x - center) / gamma) ** 2)
 
 
@@ -22,73 +24,68 @@ def run_double_correlation(
     x: np.ndarray,
     y_dip: np.ndarray,
     *,
-    min_width: float,
-    max_width: float,
-    width_step: float,
-    template_height: float = 0.15,
-    normalize_template: bool = False,
-    demean: bool = True,
-    center_step_bins: int = 1,
+    cfg: BenchmarkConfig | None = None,
+    min_width: float | None = None,
+    max_width: float | None = None,
+    width_step: float | None = None,
+    template_height: float | None = None,
+    normalize_template: bool | None = None,
+    demean: bool | None = None,
+    center_step_bins: int | None = None,
     restrict_window_mhz: float | None = None,
 ) -> dict:
     """
     Double-correlation ODMR estimator.
 
-    Strategy:
-    - convert dip spectrum to peak-form
-    - build left and right Lorentzian template banks
-    - jointly score left/right resonance pairs
-    - return the best pair
+    This keeps backward compatibility with the earlier simple call signature,
+    but now also supports a shared BenchmarkConfig.
     """
-    x = np.asarray(x, dtype=float)
-    y = peak_from_dip(y_dip).astype(float)
+    if cfg is None:
+        cfg = BenchmarkConfig()
 
-    if demean:
+    cfg = with_overrides(
+        cfg,
+        min_width=min_width,
+        max_width=max_width,
+        width_step=width_step,
+        template_height=template_height,
+        normalize_template=normalize_template,
+        demean=demean,
+        center_step_bins=center_step_bins,
+        restrict_window_mhz=restrict_window_mhz,
+    )
+
+    x = np.asarray(x, dtype=float)
+    y = peak_from_dip(y_dip)
+
+    if cfg.demean:
         y = y - np.mean(y)
 
-    mid_idx = len(x) // 2
-    step = max(1, int(center_step_bins))
+    regions = get_search_regions(x, y, cfg)
+    left_centers = regions["left_centers"]
+    right_centers = regions["right_centers"]
 
-    left_centers_all = x[: mid_idx + 1 : step]
-    right_centers_all = x[mid_idx::step]
-
-    if restrict_window_mhz is not None:
-        iL = int(np.argmax(y[:mid_idx]))
-        iR = mid_idx + int(np.argmax(y[mid_idx:]))
-
-        guess_L = float(x[iL])
-        guess_R = float(x[iR])
-
-        left_centers = left_centers_all[np.abs(left_centers_all - guess_L) <= restrict_window_mhz]
-        right_centers = right_centers_all[np.abs(right_centers_all - guess_R) <= restrict_window_mhz]
-
-        if len(left_centers) < 1:
-            left_centers = left_centers_all
-        if len(right_centers) < 1:
-            right_centers = right_centers_all
-    else:
-        left_centers = left_centers_all
-        right_centers = right_centers_all
+    width_candidates = get_width_candidates(cfg)
 
     best = None  # (score, gamma, xL, xR)
 
-    for gamma in np.arange(min_width, max_width + 1e-12, width_step):
+    for gamma in width_candidates:
         gamma = float(gamma)
 
         L = np.stack(
-            [lorentzian_peak(x, float(c), gamma, template_height) for c in left_centers],
+            [lorentzian_peak(x, float(c), gamma, cfg.template_height) for c in left_centers],
             axis=0,
         )
         R = np.stack(
-            [lorentzian_peak(x, float(c), gamma, template_height) for c in right_centers],
+            [lorentzian_peak(x, float(c), gamma, cfg.template_height) for c in right_centers],
             axis=0,
         )
 
-        if demean:
+        if cfg.demean:
             L = L - L.mean(axis=1, keepdims=True)
             R = R - R.mean(axis=1, keepdims=True)
 
-        if not normalize_template:
+        if not cfg.normalize_template:
             sL = L @ y
             sR = R @ y
 
@@ -131,8 +128,10 @@ def run_double_correlation(
 
     return {
         "name": "DoubleCorrelation",
+        "benchmark_variant": f"{'norm' if cfg.normalize_template else 'raw'}_{cfg.width_mode}",
         "f1_hat": float(min(xL, xR)),
         "f2_hat": float(max(xL, xR)),
         "gamma": float(gamma),
         "score": float(score),
+        "used_cfg": cfg,
     }
