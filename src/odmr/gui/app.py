@@ -1,37 +1,51 @@
 from __future__ import annotations
 
-from dataclasses import replace
+import time
 from typing import Any
 
 import numpy as np
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QProgressBar,
     QSpinBox,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QComboBox,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from odmr.benchmark_config import BenchmarkConfig
+from odmr.benchmark_config import (
+    BenchmarkConfig,
+    all_correlation_variants,
+    variant_label,
+)
 from odmr.simulation import generate_random_odmr_trace
 from odmr.algorithms.single_correlation import run_single_correlation
 from odmr.algorithms.double_correlation import run_double_correlation
+from odmr.algorithms.common import lorentzian_peak
+
+
+TRUTH_COLOR = "limegreen"
+SINGLE_COLOR = "gold"
+DOUBLE_COLOR = "cyan"
 
 
 def apply_modern_dark(app) -> None:
@@ -74,11 +88,16 @@ def apply_modern_dark(app) -> None:
         }
         QPushButton:hover { background: rgba(255,255,255,0.10); }
         QPushButton:disabled { color: rgba(255,255,255,0.30); }
-        QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+        QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTableWidget {
             padding: 6px;
             border-radius: 8px;
             border: 1px solid rgba(255,255,255,0.10);
             background: rgba(255,255,255,0.04);
+        }
+        QHeaderView::section {
+            background: rgba(255,255,255,0.06);
+            padding: 6px;
+            border: 1px solid rgba(255,255,255,0.08);
         }
         """
     )
@@ -86,14 +105,121 @@ def apply_modern_dark(app) -> None:
 
 class MplCanvas(FigureCanvas):
     def __init__(self, title: str = "") -> None:
-        fig = Figure(figsize=(7.0, 5.0), dpi=100)
+        fig = Figure(figsize=(8.2, 5.5), dpi=100)
         self.ax = fig.add_subplot(111)
         if title:
             self.ax.set_title(title)
         super().__init__(fig)
 
 
+def _table_item(text: str) -> QTableWidgetItem:
+    item = QTableWidgetItem(text)
+    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+    return item
+
+
+def template_dip_from_params(
+    x: np.ndarray,
+    f1: float,
+    f2: float,
+    gamma: float,
+    height: float,
+) -> np.ndarray:
+    return 1.0 - (
+        lorentzian_peak(x, f1, gamma, height) +
+        lorentzian_peak(x, f2, gamma, height)
+    )
+
+
+class BenchmarkWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(list)
+    cancelled = Signal(list)
+    errored = Signal(str)
+
+    def __init__(
+        self,
+        x: np.ndarray,
+        y_dip: np.ndarray,
+        truth: dict[str, Any],
+        jobs: list[dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.x = x
+        self.y_dip = y_dip
+        self.truth = truth
+        self.jobs = jobs
+        self._cancel_requested = False
+
+    @Slot()
+    def cancel(self) -> None:
+        self._cancel_requested = True
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            records: list[dict[str, Any]] = []
+            total = max(1, len(self.jobs))
+            done = 0
+
+            for job in self.jobs:
+                if self._cancel_requested:
+                    self.cancelled.emit(records)
+                    return
+
+                algo_name = job["algorithm"]
+                cfg = job["cfg"]
+
+                t0 = time.perf_counter()
+
+                if algo_name == "SingleCorrelation":
+                    result = run_single_correlation(self.x, self.y_dip, cfg=cfg)
+                elif algo_name == "DoubleCorrelation":
+                    result = run_double_correlation(self.x, self.y_dip, cfg=cfg)
+                else:
+                    raise ValueError(f"Unsupported algorithm: {algo_name}")
+
+                runtime_ms = 1000.0 * (time.perf_counter() - t0)
+
+                e1 = abs(float(result["f1_hat"]) - float(self.truth["resonance_value1"]))
+                e2 = abs(float(result["f2_hat"]) - float(self.truth["resonance_value2"]))
+                em = 0.5 * (e1 + e2)
+
+                if "gamma_left" in result:
+                    gamma_repr = f"{result['gamma_left']:.3f} / {result['gamma_right']:.3f}"
+                else:
+                    gamma_repr = f"{result['gamma']:.3f}"
+
+                records.append(
+                    {
+                        "algorithm": result["name"],
+                        "variant": result["benchmark_variant"],
+                        "normalization_mode": cfg.normalization_mode,
+                        "width_mode": cfg.width_mode,
+                        "f1_hat": float(result["f1_hat"]),
+                        "f2_hat": float(result["f2_hat"]),
+                        "gamma_repr": gamma_repr,
+                        "score": float(result["score"]),
+                        "err_f1": float(e1),
+                        "err_f2": float(e2),
+                        "mean_err": float(em),
+                        "runtime_ms": float(runtime_ms),
+                        "result": result,
+                    }
+                )
+
+                done += 1
+                self.progress.emit(done, total, f"{algo_name} | {cfg.normalization_mode}_{cfg.width_mode}")
+
+            self.finished.emit(records)
+
+        except Exception as exc:
+            self.errored.emit(f"{type(exc).__name__}: {exc}")
+
+
 class MainWindow(QMainWindow):
+    ALGORITHM_NAMES = ["SingleCorrelation", "DoubleCorrelation"]
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ODMR Correlation GUI")
@@ -102,44 +228,62 @@ class MainWindow(QMainWindow):
         self.current_y_dip: np.ndarray | None = None
         self.current_truth: dict[str, Any] | None = None
 
-        self.last_single_result: dict[str, Any] | None = None
-        self.last_double_result: dict[str, Any] | None = None
+        self.records_by_key: dict[str, dict[str, Any]] = {}
+        self.all_records: list[dict[str, Any]] = []
+
+        self._worker_thread: QThread | None = None
+        self._worker: BenchmarkWorker | None = None
+
+        self.row_specs: list[dict[str, Any]] = []
+        self.row_run_states: dict[str, bool] = {}
+        self.row_center_states: dict[str, bool] = {}
+        self.row_wave_states: dict[str, bool] = {}
 
         self._build_ui()
+        self._rebuild_main_table()
 
     def _build_ui(self) -> None:
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
+        top_controls = QWidget()
+        top_controls_layout = QHBoxLayout(top_controls)
 
-        left_layout.addWidget(self._build_simulation_group())
-        left_layout.addWidget(self._build_benchmark_group())
-        left_layout.addWidget(self._build_actions_group())
-        left_layout.addStretch(1)
+        top_controls_layout.addWidget(self._build_simulation_group())
+        top_controls_layout.addWidget(self._build_benchmark_group())
+        top_controls_layout.addWidget(self._build_actions_group())
+        top_controls_layout.addWidget(self._build_main_table_group(), stretch=1)
 
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
 
         self.lbl_truth = QLabel("Truth: —")
         self.lbl_truth.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        self.canvas = MplCanvas("ODMR dip trace + correlation estimates")
+        self.canvas = MplCanvas("ODMR dip trace + selected overlays")
+        self.canvas_err = MplCanvas("Mean error by variant")
 
-        self.txt_results = QPlainTextEdit()
-        self.txt_results.setReadOnly(True)
-        self.txt_results.setPlaceholderText("Generate a trace, then run the selected config or the standard benchmark set.")
+        graphs_splitter = QSplitter(Qt.Horizontal)
+        graphs_splitter.addWidget(self.canvas)
+        graphs_splitter.addWidget(self.canvas_err)
+        graphs_splitter.setSizes([950, 650])
 
-        right_layout.addWidget(self.lbl_truth)
-        right_layout.addWidget(self.canvas, stretch=1)
-        right_layout.addWidget(self.txt_results, stretch=0)
+        left_layout.addWidget(self.lbl_truth)
+        left_layout.addWidget(graphs_splitter, stretch=1)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setSizes([380, 980])
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.addWidget(QLabel("Status"))
+        self.txt_status = QPlainTextEdit()
+        self.txt_status.setReadOnly(True)
+        right_layout.addWidget(self.txt_status, stretch=1)
+
+        bottom_splitter = QSplitter(Qt.Horizontal)
+        bottom_splitter.addWidget(left_panel)
+        bottom_splitter.addWidget(right_panel)
+        bottom_splitter.setSizes([1600, 400])
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
-        root_layout.addWidget(splitter)
+        root_layout.addWidget(top_controls, stretch=0)
+        root_layout.addWidget(bottom_splitter, stretch=1)
 
         self.setCentralWidget(root)
 
@@ -210,10 +354,6 @@ class MainWindow(QMainWindow):
         g = QGroupBox("Benchmark config")
         form = QFormLayout(g)
 
-        self.cmb_width_mode = QComboBox()
-        self.cmb_width_mode.addItems(["scan", "fixed"])
-        self.cmb_width_mode.setCurrentText("scan")
-
         self.ds_standard_width = QDoubleSpinBox()
         self.ds_standard_width.setRange(1e-6, 1e6)
         self.ds_standard_width.setDecimals(3)
@@ -237,37 +377,23 @@ class MainWindow(QMainWindow):
         self.ds_template_height = QDoubleSpinBox()
         self.ds_template_height.setRange(0.0, 10.0)
         self.ds_template_height.setDecimals(6)
-        self.ds_template_height.setValue(0.15)
-
-        self.ck_normalize = QCheckBox("normalize template")
-        self.ck_normalize.setChecked(False)
-
-        self.ck_demean = QCheckBox("demean before correlation")
-        self.ck_demean.setChecked(True)
-
-        self.ck_require_side = QCheckBox("require one peak per side")
-        self.ck_require_side.setChecked(True)
+        self.ds_template_height.setValue(1.0)
 
         self.sp_center_step = QSpinBox()
         self.sp_center_step.setRange(1, 100)
         self.sp_center_step.setValue(1)
 
-        self.ds_restrict = QDoubleSpinBox()
-        self.ds_restrict.setRange(0.0, 1e6)
-        self.ds_restrict.setDecimals(3)
-        self.ds_restrict.setValue(0.0)
+        self.cmb_require_side = QComboBox()
+        self.cmb_require_side.addItems(["true", "false"])
+        self.cmb_require_side.setCurrentText("true")
 
-        form.addRow("width_mode", self.cmb_width_mode)
         form.addRow("standard_width", self.ds_standard_width)
         form.addRow("min_width", self.ds_min_width)
         form.addRow("max_width", self.ds_max_width)
         form.addRow("width_step", self.ds_width_step)
         form.addRow("template_height", self.ds_template_height)
-        form.addRow(self.ck_normalize)
-        form.addRow(self.ck_demean)
-        form.addRow(self.ck_require_side)
         form.addRow("center_step_bins", self.sp_center_step)
-        form.addRow("restrict_window_mhz (0=off)", self.ds_restrict)
+        form.addRow("require_one_peak_per_side", self.cmb_require_side)
 
         return g
 
@@ -276,17 +402,44 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(g)
 
         self.btn_generate = QPushButton("Generate trace")
-        self.btn_run_selected = QPushButton("Run selected config")
-        self.btn_run_benchmark_set = QPushButton("Run standard 4-variant set")
+        self.btn_run_selected = QPushButton("Run checked rows")
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setEnabled(False)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+
+        self.lbl_progress = QLabel("Idle")
 
         self.btn_generate.clicked.connect(self._on_generate)
         self.btn_run_selected.clicked.connect(self._on_run_selected)
-        self.btn_run_benchmark_set.clicked.connect(self._on_run_benchmark_set)
+        self.btn_cancel.clicked.connect(self._on_cancel)
 
         layout.addWidget(self.btn_generate)
         layout.addWidget(self.btn_run_selected)
-        layout.addWidget(self.btn_run_benchmark_set)
+        layout.addWidget(self.btn_cancel)
+        layout.addWidget(self.progress)
+        layout.addWidget(self.lbl_progress)
 
+        return g
+
+    def _build_main_table_group(self) -> QGroupBox:
+        g = QGroupBox("Algorithms / variants")
+        layout = QVBoxLayout(g)
+
+        self.tbl_main = QTableWidget(0, 12)
+        self.tbl_main.setHorizontalHeaderLabels([
+            "Algorithm", "Variant", "Run", "Centerlines", "Wave",
+            "f1", "f2", "Gamma", "Score",
+            "err_f1", "err_f2", "mean_err"
+        ])
+        self.tbl_main.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_main.verticalHeader().setVisible(False)
+        self.tbl_main.setMinimumWidth(1400)
+        self.tbl_main.setMaximumHeight(520)
+
+        layout.addWidget(self.tbl_main)
         return g
 
     def _simulation_kwargs(self) -> dict[str, Any]:
@@ -303,67 +456,187 @@ class MainWindow(QMainWindow):
             "seed": int(self.sp_seed.value()),
         }
 
-    def _cfg_from_ui(self) -> BenchmarkConfig:
-        restrict = float(self.ds_restrict.value())
-        restrict_value = None if restrict <= 0.0 else restrict
+    def _cfg_from_ui(self) -> dict[str, float | int | str | bool]:
+        return {
+            "min_width": float(self.ds_min_width.value()),
+            "max_width": float(self.ds_max_width.value()),
+            "width_step": float(self.ds_width_step.value()),
+            "standard_width": float(self.ds_standard_width.value()),
+            "width_mode": "scan",
+            "template_height": float(self.ds_template_height.value()),
+            "normalization_mode": "raw",
+            "center_step_bins": int(self.sp_center_step.value()),
+            "require_one_peak_per_side": (self.cmb_require_side.currentText() == "true"),
+        }
 
-        return BenchmarkConfig(
-            min_width=float(self.ds_min_width.value()),
-            max_width=float(self.ds_max_width.value()),
-            width_step=float(self.ds_width_step.value()),
-            standard_width=float(self.ds_standard_width.value()),
-            width_mode=str(self.cmb_width_mode.currentText()),
-            template_height=float(self.ds_template_height.value()),
-            normalize_template=bool(self.ck_normalize.isChecked()),
-            demean=bool(self.ck_demean.isChecked()),
-            center_step_bins=int(self.sp_center_step.value()),
-            restrict_window_mhz=restrict_value,
-            require_one_peak_per_side=bool(self.ck_require_side.isChecked()),
+    def _all_standard_variants(self) -> list[BenchmarkConfig]:
+        base_cfg = BenchmarkConfig(**self._cfg_from_ui())
+        return all_correlation_variants(base_cfg)
+
+    def _append_status(self, text: str) -> None:
+        self.txt_status.appendPlainText(text)
+
+    def _clear_status(self) -> None:
+        self.txt_status.setPlainText("")
+
+    def _row_key(self, spec: dict[str, Any]) -> str:
+        if spec["kind"] == "truth":
+            return "truth"
+        return f"variant:{spec['algorithm']}:{spec['variant']}"
+
+    def _variant_row_specs(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for algo_name in self.ALGORITHM_NAMES:
+            for cfg in self._all_standard_variants():
+                out.append(
+                    {
+                        "kind": "variant",
+                        "algorithm": algo_name,
+                        "variant": variant_label(cfg),
+                        "cfg": cfg,
+                    }
+                )
+        return out
+
+    def _selected_jobs(self) -> list[dict[str, Any]]:
+        jobs: list[dict[str, Any]] = []
+
+        for spec in self.row_specs:
+            key = self._row_key(spec)
+            if not self.row_run_states.get(key, False):
+                continue
+
+            if spec["kind"] == "variant":
+                jobs.append(
+                    {
+                        "algorithm": spec["algorithm"],
+                        "cfg": spec["cfg"],
+                    }
+                )
+
+        return jobs
+
+    def _rebuild_main_table(self) -> None:
+        old_run = dict(self.row_run_states)
+        old_center = dict(self.row_center_states)
+        old_wave = dict(self.row_wave_states)
+
+        self.row_specs = [{"kind": "truth"}]
+        self.row_specs.extend(self._variant_row_specs())
+
+        self.tbl_main.setRowCount(len(self.row_specs))
+        self.row_run_states = {}
+        self.row_center_states = {}
+        self.row_wave_states = {}
+
+        for row, spec in enumerate(self.row_specs):
+            key = self._row_key(spec)
+
+            if spec["kind"] == "truth":
+                default_run = False
+                default_center = True
+                default_wave = False
+            else:
+                default_run = True
+                default_center = False
+                default_wave = False
+
+            self.row_run_states[key] = old_run.get(key, default_run)
+            self.row_center_states[key] = old_center.get(key, default_center)
+            self.row_wave_states[key] = old_wave.get(key, default_wave)
+
+            self._populate_row(row, spec)
+
+    def _checkbox(self, checked: bool, enabled: bool, slot) -> QCheckBox:
+        ck = QCheckBox()
+        ck.setChecked(checked)
+        ck.setEnabled(enabled)
+        ck.stateChanged.connect(slot)
+        return ck
+
+    def _populate_row(self, row: int, spec: dict[str, Any]) -> None:
+        key = self._row_key(spec)
+
+        run_enabled = spec["kind"] != "truth"
+        run_ck = self._checkbox(
+            self.row_run_states[key],
+            run_enabled,
+            lambda _state, k=key: self._on_run_checkbox_changed(k),
+        )
+        center_ck = self._checkbox(
+            self.row_center_states[key],
+            True,
+            lambda _state, k=key: self._on_center_checkbox_changed(k),
+        )
+        wave_ck = self._checkbox(
+            self.row_wave_states[key],
+            True,
+            lambda _state, k=key: self._on_wave_checkbox_changed(k),
         )
 
-    def _four_standard_variants(self) -> list[BenchmarkConfig]:
-        base = self._cfg_from_ui()
+        self.tbl_main.setCellWidget(row, 2, run_ck)
+        self.tbl_main.setCellWidget(row, 3, center_ck)
+        self.tbl_main.setCellWidget(row, 4, wave_ck)
 
-        return [
-            replace(base, normalize_template=False, width_mode="scan"),
-            replace(base, normalize_template=True, width_mode="scan"),
-            replace(base, normalize_template=False, width_mode="fixed"),
-            replace(base, normalize_template=True, width_mode="fixed"),
-        ]
+        if spec["kind"] == "truth":
+            f1_text = f"{self.current_truth['resonance_value1']:.3f}" if self.current_truth else ""
+            f2_text = f"{self.current_truth['resonance_value2']:.3f}" if self.current_truth else ""
 
-    def _append_results(self, text: str) -> None:
-        self.txt_results.appendPlainText(text)
+            self.tbl_main.setItem(row, 0, _table_item("Truth"))
+            self.tbl_main.setItem(row, 1, _table_item("truth"))
+            self.tbl_main.setItem(row, 5, _table_item(f1_text))
+            self.tbl_main.setItem(row, 6, _table_item(f2_text))
+            self.tbl_main.setItem(row, 7, _table_item(self.current_truth and f"{self.current_truth['width']:.3f}" or ""))
+            self.tbl_main.setItem(row, 8, _table_item(""))
+            self.tbl_main.setItem(row, 9, _table_item(""))
+            self.tbl_main.setItem(row, 10, _table_item(""))
+            self.tbl_main.setItem(row, 11, _table_item(""))
+            return
 
-    def _clear_results(self) -> None:
-        self.txt_results.setPlainText("")
+        algo_name = spec["algorithm"]
+        variant = spec["variant"]
+        rec = self.records_by_key.get(f"{algo_name}:{variant}")
 
-    def _format_error_block(self, result: dict[str, Any], truth: dict[str, Any]) -> str:
-        e1 = abs(float(result["f1_hat"]) - float(truth["resonance_value1"]))
-        e2 = abs(float(result["f2_hat"]) - float(truth["resonance_value2"]))
-        em = 0.5 * (e1 + e2)
+        self.tbl_main.setItem(row, 0, _table_item(algo_name))
+        self.tbl_main.setItem(row, 1, _table_item(variant))
+        self.tbl_main.setItem(row, 5, _table_item(f"{rec['f1_hat']:.3f}" if rec else ""))
+        self.tbl_main.setItem(row, 6, _table_item(f"{rec['f2_hat']:.3f}" if rec else ""))
+        self.tbl_main.setItem(row, 7, _table_item(rec["gamma_repr"] if rec else ""))
+        self.tbl_main.setItem(row, 8, _table_item(f"{rec['score']:.3f}" if rec else ""))
+        self.tbl_main.setItem(row, 9, _table_item(f"{rec['err_f1']:.3f}" if rec else ""))
+        self.tbl_main.setItem(row, 10, _table_item(f"{rec['err_f2']:.3f}" if rec else ""))
+        self.tbl_main.setItem(row, 11, _table_item(f"{rec['mean_err']:.3f}" if rec else ""))
 
-        lines = [
-            f"  variant   = {result['benchmark_variant']}",
-            f"  f1_hat    = {result['f1_hat']:.3f} MHz",
-            f"  f2_hat    = {result['f2_hat']:.3f} MHz",
-        ]
+    def _update_records(self, records: list[dict[str, Any]]) -> None:
+        self.records_by_key = {f"{r['algorithm']}:{r['variant']}": r for r in records}
 
-        if "gamma_left" in result:
-            lines.append(f"  gamma_L   = {result['gamma_left']:.3f}")
-            lines.append(f"  gamma_R   = {result['gamma_right']:.3f}")
-        else:
-            lines.append(f"  gamma     = {result['gamma']:.3f}")
+    def _update_error_chart(self) -> None:
+        ax = self.canvas_err.ax
+        ax.clear()
+        ax.set_title("Mean error by variant")
+        ax.set_xlabel("Mean error (MHz)")
+        ax.set_ylabel("Variant")
 
-        lines.append(f"  score     = {result['score']:.3f}")
-        lines.append(f"  err_f1    = {e1:.3f} MHz")
-        lines.append(f"  err_f2    = {e2:.3f} MHz")
-        lines.append(f"  mean_err  = {em:.3f} MHz")
-        return "\n".join(lines)
+        if not self.all_records:
+            self.canvas_err.draw_idle()
+            return
+
+        ordered = sorted(self.all_records, key=lambda r: (r["mean_err"], r["algorithm"], r["variant"]))
+        labels = [f"{r['algorithm']} | {r['variant']}" for r in ordered]
+        values = [r["mean_err"] for r in ordered]
+
+        y = np.arange(len(values))
+        ax.barh(y, values)
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontsize=8)
+        ax.invert_yaxis()
+        self.canvas_err.figure.tight_layout()
+        self.canvas_err.draw_idle()
 
     def _plot_current_trace(self) -> None:
         ax = self.canvas.ax
         ax.clear()
-        ax.set_title("ODMR dip trace + correlation estimates")
+        ax.set_title("ODMR dip trace + selected overlays")
         ax.set_xlabel("Frequency (MHz)")
         ax.set_ylabel("Normalized count (dip)")
 
@@ -374,26 +647,161 @@ class MainWindow(QMainWindow):
         x = self.current_x
         y = self.current_y_dip
         truth = self.current_truth
+        contrast = float(truth.get("success_probability_at_resonance", 0.15))
 
         ax.scatter(x, y, s=12, label="data")
 
-        ax.axvline(float(truth["resonance_value1"]), linestyle="--", linewidth=1.5, label="truth f1")
-        ax.axvline(float(truth["resonance_value2"]), linestyle="--", linewidth=1.5, label="truth f2")
+        color_map = {
+            "SingleCorrelation": SINGLE_COLOR,
+            "DoubleCorrelation": DOUBLE_COLOR,
+        }
 
-        if self.last_single_result is not None:
-            ax.axvline(float(self.last_single_result["f1_hat"]), linestyle=":", linewidth=1.5, label="single f1")
-            ax.axvline(float(self.last_single_result["f2_hat"]), linestyle=":", linewidth=1.5, label="single f2")
+        for spec in self.row_specs:
+            key = self._row_key(spec)
+            show_center = self.row_center_states.get(key, False)
+            show_wave = self.row_wave_states.get(key, False)
 
-        if self.last_double_result is not None:
-            ax.axvline(float(self.last_double_result["f1_hat"]), linestyle="-", linewidth=1.5, label="double f1")
-            ax.axvline(float(self.last_double_result["f2_hat"]), linestyle="-", linewidth=1.5, label="double f2")
+            if not show_center and not show_wave:
+                continue
+
+            if spec["kind"] == "truth":
+                if show_center:
+                    ax.axvline(float(truth["resonance_value1"]), linestyle="--", linewidth=1.8, color=TRUTH_COLOR, label="truth f1")
+                    ax.axvline(float(truth["resonance_value2"]), linestyle="--", linewidth=1.8, color=TRUTH_COLOR, label="truth f2")
+                if show_wave:
+                    y_truth = template_dip_from_params(
+                        x,
+                        float(truth["resonance_value1"]),
+                        float(truth["resonance_value2"]),
+                        float(truth["width"]),
+                        contrast,
+                    )
+                    ax.plot(x, y_truth, linewidth=2.0, color=TRUTH_COLOR, label="truth wave")
+                continue
+
+            algo_name = spec["algorithm"]
+            variant = spec["variant"]
+            rec = self.records_by_key.get(f"{algo_name}:{variant}")
+            if rec is None:
+                continue
+
+            result = rec["result"]
+            color = color_map[algo_name]
+
+            if show_center:
+                ax.axvline(float(result["f1_hat"]), linestyle=":", linewidth=1.8, color=color, label=f"{algo_name} {variant} f1")
+                ax.axvline(float(result["f2_hat"]), linestyle=":", linewidth=1.8, color=color, label=f"{algo_name} {variant} f2")
+
+            if show_wave:
+                if algo_name == "SingleCorrelation":
+                    gamma = 0.5 * (float(result["gamma_left"]) + float(result["gamma_right"]))
+                else:
+                    gamma = float(result["gamma"])
+
+                y_model = template_dip_from_params(
+                    x,
+                    float(result["f1_hat"]),
+                    float(result["f2_hat"]),
+                    gamma,
+                    contrast,
+                )
+                ax.plot(x, y_model, linewidth=2.0, color=color, label=f"{algo_name} {variant} wave")
 
         ax.legend(fontsize=8, loc="best")
         self.canvas.draw_idle()
 
+    def _set_running_ui(self, running: bool) -> None:
+        self.btn_generate.setEnabled(not running)
+        self.btn_run_selected.setEnabled(not running)
+        self.btn_cancel.setEnabled(running)
+
+    def _start_worker(self, jobs: list[dict[str, Any]]) -> None:
+        if self.current_x is None or self.current_y_dip is None or self.current_truth is None:
+            QMessageBox.information(self, "No trace", "Generate a trace first.")
+            return
+
+        if not jobs:
+            QMessageBox.information(self, "No rows selected", "Check at least one run row.")
+            return
+
+        if self._worker_thread is not None:
+            QMessageBox.information(self, "Busy", "A run is already in progress.")
+            return
+
+        self._clear_status()
+        self.progress.setRange(0, max(1, len(jobs)))
+        self.progress.setValue(0)
+        self.lbl_progress.setText("Starting...")
+        self.records_by_key = {}
+        self.all_records = []
+        self._rebuild_main_table()
+        self._plot_current_trace()
+        self._update_error_chart()
+
+        self._worker_thread = QThread()
+        self._worker = BenchmarkWorker(
+            self.current_x,
+            self.current_y_dip,
+            self.current_truth,
+            jobs,
+        )
+        self._worker.moveToThread(self._worker_thread)
+
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_worker_progress)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.cancelled.connect(self._on_worker_cancelled)
+        self._worker.errored.connect(self._on_worker_error)
+
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.cancelled.connect(self._worker_thread.quit)
+        self._worker.errored.connect(self._worker_thread.quit)
+        self._worker_thread.finished.connect(self._on_thread_finished)
+
+        self._set_running_ui(True)
+        self._worker_thread.start()
+
+    @Slot(int, int, str)
+    def _on_worker_progress(self, done: int, total: int, label: str) -> None:
+        self.progress.setRange(0, total)
+        self.progress.setValue(done)
+        self.lbl_progress.setText(f"{done}/{total} | {label}")
+
+    @Slot(list)
+    def _on_worker_finished(self, records: list[dict[str, Any]]) -> None:
+        self.all_records = records
+        self._update_records(records)
+        self._rebuild_main_table()
+        self._plot_current_trace()
+        self._update_error_chart()
+        self.lbl_progress.setText("Done")
+        self._append_status(f"Completed {len(records)} runs.")
+
+    @Slot(list)
+    def _on_worker_cancelled(self, records: list[dict[str, Any]]) -> None:
+        self.all_records = records
+        self._update_records(records)
+        self._rebuild_main_table()
+        self._plot_current_trace()
+        self._update_error_chart()
+        self.lbl_progress.setText("Cancelled")
+        self._append_status(f"Cancelled. Partial results kept: {len(records)} runs.")
+
+    @Slot(str)
+    def _on_worker_error(self, msg: str) -> None:
+        self.lbl_progress.setText("Error")
+        QMessageBox.critical(self, "Run error", msg)
+
+    @Slot()
+    def _on_thread_finished(self) -> None:
+        self._worker = None
+        self._worker_thread = None
+        self._set_running_ui(False)
+
     @Slot()
     def _on_generate(self) -> None:
         try:
+            used_seed = int(self.sp_seed.value())
             x, y_dip, truth = generate_random_odmr_trace(**self._simulation_kwargs())
         except Exception as exc:
             QMessageBox.critical(self, "Generation error", f"{type(exc).__name__}: {exc}")
@@ -402,96 +810,79 @@ class MainWindow(QMainWindow):
         self.current_x = x
         self.current_y_dip = y_dip
         self.current_truth = truth
-        self.last_single_result = None
-        self.last_double_result = None
+        self.records_by_key = {}
+        self.all_records = []
+
+        self.sp_seed.setValue(min(self.sp_seed.maximum(), used_seed + 1))
 
         self.lbl_truth.setText(
             "Truth: "
             f"f1={truth['resonance_value1']:.3f} MHz, "
             f"f2={truth['resonance_value2']:.3f} MHz, "
             f"width={truth['width']:.3f}, "
-            f"n_tries={truth['num_tries']}"
+            f"n_tries={truth['num_tries']} "
+            f"(seed={used_seed})"
         )
 
-        self._clear_results()
-        self._append_results("Generated trace.")
-        self._append_results(
-            f"Truth\n"
-            f"  f1        = {truth['resonance_value1']:.3f} MHz\n"
-            f"  f2        = {truth['resonance_value2']:.3f} MHz\n"
-            f"  width     = {truth['width']:.3f}\n"
+        self._clear_status()
+        self._append_status("Generated trace.")
+        self._append_status(
+            f"Truth | f1={truth['resonance_value1']:.3f} MHz, "
+            f"f2={truth['resonance_value2']:.3f} MHz, width={truth['width']:.3f}, seed={used_seed}"
         )
+        self._rebuild_main_table()
         self._plot_current_trace()
-
-    def _run_current_algorithms(self, cfg: BenchmarkConfig) -> tuple[dict[str, Any], dict[str, Any]]:
-        if self.current_x is None or self.current_y_dip is None:
-            raise RuntimeError("No current trace. Generate a trace first.")
-
-        single = run_single_correlation(self.current_x, self.current_y_dip, cfg=cfg)
-        double = run_double_correlation(self.current_x, self.current_y_dip, cfg=cfg)
-        return single, double
+        self._update_error_chart()
 
     @Slot()
     def _on_run_selected(self) -> None:
-        if self.current_truth is None:
-            QMessageBox.information(self, "No trace", "Generate a trace first.")
-            return
-
-        try:
-            cfg = self._cfg_from_ui()
-            single, double = self._run_current_algorithms(cfg)
-        except Exception as exc:
-            QMessageBox.critical(self, "Run error", f"{type(exc).__name__}: {exc}")
-            return
-
-        self.last_single_result = single
-        self.last_double_result = double
-        self._plot_current_trace()
-
-        self._clear_results()
-        self._append_results("Selected benchmark config")
-        self._append_results(
-            f"  width_mode={cfg.width_mode}, normalize_template={cfg.normalize_template}, "
-            f"require_one_peak_per_side={cfg.require_one_peak_per_side}"
-        )
-        self._append_results("")
-
-        self._append_results("SingleCorrelation")
-        self._append_results(self._format_error_block(single, self.current_truth))
-        self._append_results("")
-
-        self._append_results("DoubleCorrelation")
-        self._append_results(self._format_error_block(double, self.current_truth))
+        self._rebuild_main_table()
+        self._start_worker(self._selected_jobs())
 
     @Slot()
-    def _on_run_benchmark_set(self) -> None:
-        if self.current_truth is None:
-            QMessageBox.information(self, "No trace", "Generate a trace first.")
+    def _on_cancel(self) -> None:
+        if self._worker is not None:
+            self._worker.cancel()
+            self.lbl_progress.setText("Cancelling...")
+
+    def _find_row_index(self, key: str) -> int | None:
+        for idx, spec in enumerate(self.row_specs):
+            if self._row_key(spec) == key:
+                return idx
+        return None
+
+    def _on_run_checkbox_changed(self, key: str) -> None:
+        row = self._find_row_index(key)
+        if row is None:
             return
+        widget = self.tbl_main.cellWidget(row, 2)
+        if isinstance(widget, QCheckBox):
+            self.row_run_states[key] = widget.isChecked()
 
-        try:
-            variants = self._four_standard_variants()
-        except Exception as exc:
-            QMessageBox.critical(self, "Config error", f"{type(exc).__name__}: {exc}")
+    def _on_center_checkbox_changed(self, key: str) -> None:
+        row = self._find_row_index(key)
+        if row is None:
             return
+        widget = self.tbl_main.cellWidget(row, 3)
+        if isinstance(widget, QCheckBox):
+            self.row_center_states[key] = widget.isChecked()
+        self._plot_current_trace()
 
-        self._clear_results()
-        self._append_results("Standard 4-variant correlation benchmark set")
-        self._append_results("")
+    def _on_wave_checkbox_changed(self, key: str) -> None:
+        row = self._find_row_index(key)
+        if row is None:
+            return
+        widget = self.tbl_main.cellWidget(row, 4)
+        if isinstance(widget, QCheckBox):
+            self.row_wave_states[key] = widget.isChecked()
+        self._plot_current_trace()
 
-        for cfg in variants:
-            try:
-                single, double = self._run_current_algorithms(cfg)
-            except Exception as exc:
-                QMessageBox.critical(self, "Run error", f"{type(exc).__name__}: {exc}")
-                return
+    def closeEvent(self, event) -> None:
+        if self._worker is not None:
+            self._worker.cancel()
 
-            self._append_results(
-                f"Variant: width_mode={cfg.width_mode}, normalize_template={cfg.normalize_template}"
-            )
-            self._append_results("SingleCorrelation")
-            self._append_results(self._format_error_block(single, self.current_truth))
-            self._append_results("")
-            self._append_results("DoubleCorrelation")
-            self._append_results(self._format_error_block(double, self.current_truth))
-            self._append_results("")
+        if self._worker_thread is not None:
+            self._worker_thread.quit()
+            self._worker_thread.wait(2000)
+
+        super().closeEvent(event)

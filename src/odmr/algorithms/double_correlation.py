@@ -2,22 +2,41 @@ from __future__ import annotations
 
 import numpy as np
 
-from odmr.benchmark_config import BenchmarkConfig, get_search_regions, get_width_candidates, with_overrides
+from odmr.benchmark_config import (
+    BenchmarkConfig,
+    get_search_regions,
+    get_width_candidates,
+    variant_label,
+    with_overrides,
+)
+from odmr.algorithms.common import (
+    lorentzian_peak,
+    peak_from_dip,
+    process_signal_for_correlation,
+    process_template_for_correlation,
+)
 
 
-def peak_from_dip(y_dip: np.ndarray) -> np.ndarray:
-    """Convert dip-form ODMR data into peak-form."""
-    return 1.0 - np.asarray(y_dip, dtype=float)
+def _legacy_to_normalization_mode(
+    normalize_template: bool | None,
+    demean: bool | None,
+) -> str | None:
+    """
+    Backward-compatibility bridge from the old boolean API.
+    """
+    if normalize_template is None and demean is None:
+        return None
 
+    nrm = bool(normalize_template) if normalize_template is not None else False
+    dm = bool(demean) if demean is not None else False
 
-def lorentzian_peak(
-    x: np.ndarray,
-    center: float,
-    gamma: float,
-    height: float,
-) -> np.ndarray:
-    """Lorentzian peak with gamma interpreted as a width parameter."""
-    return height / (1.0 + ((x - center) / gamma) ** 2)
+    if not dm and not nrm:
+        return "raw"
+    if not dm and nrm:
+        return "l2"
+    if dm and not nrm:
+        return "demean"
+    return "demean_l2"
 
 
 def run_double_correlation(
@@ -25,6 +44,7 @@ def run_double_correlation(
     y_dip: np.ndarray,
     *,
     cfg: BenchmarkConfig | None = None,
+    normalization_mode: str | None = None,
     min_width: float | None = None,
     max_width: float | None = None,
     width_step: float | None = None,
@@ -37,31 +57,33 @@ def run_double_correlation(
     """
     Double-correlation ODMR estimator.
 
-    This keeps backward compatibility with the earlier simple call signature,
-    but now also supports a shared BenchmarkConfig.
+    Current benchmark variants are controlled through cfg.normalization_mode.
+
+    For correctness across raw / l1 / l2 / demean / demean_l1 / demean_l2,
+    the pairwise score is computed from the combined two-peak kernel.
     """
     if cfg is None:
         cfg = BenchmarkConfig()
 
+    if normalization_mode is None:
+        normalization_mode = _legacy_to_normalization_mode(normalize_template, demean)
+
     cfg = with_overrides(
         cfg,
+        normalization_mode=normalization_mode,
         min_width=min_width,
         max_width=max_width,
         width_step=width_step,
         template_height=template_height,
-        normalize_template=normalize_template,
-        demean=demean,
         center_step_bins=center_step_bins,
         restrict_window_mhz=restrict_window_mhz,
     )
 
     x = np.asarray(x, dtype=float)
-    y = peak_from_dip(y_dip)
+    y_peak = peak_from_dip(y_dip)
+    y_proc = process_signal_for_correlation(y_peak, cfg.normalization_mode)
 
-    if cfg.demean:
-        y = y - np.mean(y)
-
-    regions = get_search_regions(x, y, cfg)
+    regions = get_search_regions(x, y_peak, cfg)
     left_centers = regions["left_centers"]
     right_centers = regions["right_centers"]
 
@@ -72,54 +94,31 @@ def run_double_correlation(
     for gamma in width_candidates:
         gamma = float(gamma)
 
-        L = np.stack(
-            [lorentzian_peak(x, float(c), gamma, cfg.template_height) for c in left_centers],
-            axis=0,
-        )
-        R = np.stack(
-            [lorentzian_peak(x, float(c), gamma, cfg.template_height) for c in right_centers],
-            axis=0,
-        )
+        left_templates_raw = [
+            lorentzian_peak(x, float(c), gamma, cfg.template_height)
+            for c in left_centers
+        ]
+        right_templates_raw = [
+            lorentzian_peak(x, float(c), gamma, cfg.template_height)
+            for c in right_centers
+        ]
 
-        if cfg.demean:
-            L = L - L.mean(axis=1, keepdims=True)
-            R = R - R.mean(axis=1, keepdims=True)
+        for iL, xL in enumerate(left_centers):
+            tL = left_templates_raw[iL]
 
-        if not cfg.normalize_template:
-            sL = L @ y
-            sR = R @ y
+            for iR, xR in enumerate(right_centers):
+                tR = right_templates_raw[iR]
 
-            iL = int(np.argmax(sL))
-            iR = int(np.argmax(sR))
+                combined_raw = tL + tR
+                combined_proc = process_template_for_correlation(
+                    combined_raw,
+                    cfg.normalization_mode,
+                )
 
-            score = float(sL[iL] + sR[iR])
-            xL = float(left_centers[iL])
-            xR = float(right_centers[iR])
+                score = float(np.dot(y_proc, combined_proc))
 
-            if best is None or score > best[0]:
-                best = (score, gamma, xL, xR)
-
-        else:
-            sL = L @ y
-            sR = R @ y
-            numer = sL[:, None] + sR[None, :]
-
-            LL = np.sum(L * L, axis=1)
-            RR = np.sum(R * R, axis=1)
-            LR = L @ R.T
-
-            denom = np.sqrt(np.maximum(LL[:, None] + RR[None, :] + 2.0 * LR, 1e-18))
-            score_mat = numer / denom
-
-            flat_idx = int(np.argmax(score_mat))
-            iL, iR = np.unravel_index(flat_idx, score_mat.shape)
-
-            score = float(score_mat[iL, iR])
-            xL = float(left_centers[iL])
-            xR = float(right_centers[iR])
-
-            if best is None or score > best[0]:
-                best = (score, gamma, xL, xR)
+                if best is None or score > best[0]:
+                    best = (score, gamma, float(xL), float(xR))
 
     if best is None:
         raise RuntimeError("Double correlation failed to find a valid solution.")
@@ -128,7 +127,7 @@ def run_double_correlation(
 
     return {
         "name": "DoubleCorrelation",
-        "benchmark_variant": f"{'norm' if cfg.normalize_template else 'raw'}_{cfg.width_mode}",
+        "benchmark_variant": variant_label(cfg),
         "f1_hat": float(min(xL, xR)),
         "f2_hat": float(max(xL, xR)),
         "gamma": float(gamma),

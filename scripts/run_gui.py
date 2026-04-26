@@ -12,7 +12,7 @@ def main() -> None:
     apply_modern_dark(app)
 
     win = MainWindow()
-    win.resize(1400, 900)
+    win.resize(1950, 900)
     win.show()
 
     sys.exit(app.exec())

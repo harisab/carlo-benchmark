@@ -4,16 +4,35 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 
+NORMALIZATION_MODES = (
+    "raw",
+    "l1",
+    "l2",
+    "demean",
+    "demean_l1",
+    "demean_l2",
+)
+
+WIDTH_MODES = ("scan", "fixed")
+
+
 @dataclass(frozen=True)
 class BenchmarkConfig:
     """
     Shared benchmark configuration used by multiple algorithms.
 
-    Key benchmark assumptions:
+    Global benchmark assumptions:
     - require_one_peak_per_side=True means left/right halves are searched separately
     - width_mode='scan' means search across a width grid
     - width_mode='fixed' means use one standard width only
-    - normalize_template distinguishes normalized vs raw correlation benchmarks
+
+    Normalization variants for correlation-family algorithms:
+    - raw
+    - l1
+    - l2
+    - demean
+    - demean_l1
+    - demean_l2
     """
     min_width: float = 10.0
     max_width: float = 50.0
@@ -21,9 +40,8 @@ class BenchmarkConfig:
     standard_width: float = 20.0
     width_mode: str = "scan"  # "scan" or "fixed"
 
-    template_height: float = 0.15
-    normalize_template: bool = False
-    demean: bool = True
+    template_height: float = 1.0
+    normalization_mode: str = "raw"
 
     center_step_bins: int = 1
     restrict_window_mhz: float | None = None
@@ -31,25 +49,41 @@ class BenchmarkConfig:
     require_one_peak_per_side: bool = True
 
 
+def validate_config(cfg: BenchmarkConfig) -> None:
+    if cfg.width_mode not in WIDTH_MODES:
+        raise ValueError(f"Unsupported width_mode: {cfg.width_mode}")
+
+    if cfg.normalization_mode not in NORMALIZATION_MODES:
+        raise ValueError(f"Unsupported normalization_mode: {cfg.normalization_mode}")
+
+    if cfg.min_width <= 0:
+        raise ValueError("min_width must be > 0")
+    if cfg.max_width <= 0:
+        raise ValueError("max_width must be > 0")
+    if cfg.standard_width <= 0:
+        raise ValueError("standard_width must be > 0")
+    if cfg.width_step <= 0:
+        raise ValueError("width_step must be > 0")
+    if cfg.center_step_bins <= 0:
+        raise ValueError("center_step_bins must be > 0")
+
+
 def with_overrides(cfg: BenchmarkConfig, **kwargs) -> BenchmarkConfig:
-    """
-    Return a copy of cfg with only non-None overrides applied.
-    """
     clean = {k: v for k, v in kwargs.items() if v is not None}
-    if not clean:
-        return cfg
-    return replace(cfg, **clean)
+    out = replace(cfg, **clean) if clean else cfg
+    validate_config(out)
+    return out
+
+
+def variant_label(cfg: BenchmarkConfig) -> str:
+    return f"{cfg.normalization_mode}_{cfg.width_mode}"
 
 
 def get_width_candidates(cfg: BenchmarkConfig) -> np.ndarray:
-    """
-    Return the width candidates for the chosen benchmark mode.
-    """
+    validate_config(cfg)
+
     if cfg.width_mode == "fixed":
         return np.asarray([float(cfg.standard_width)], dtype=float)
-
-    if cfg.width_mode != "scan":
-        raise ValueError(f"Unsupported width_mode: {cfg.width_mode}")
 
     return np.arange(cfg.min_width, cfg.max_width + 1e-12, cfg.width_step, dtype=float)
 
@@ -62,6 +96,8 @@ def get_search_regions(
     """
     Shared left/right search-region logic for benchmark algorithms.
     """
+    validate_config(cfg)
+
     x = np.asarray(x, dtype=float)
     y_peak = np.asarray(y_peak, dtype=float)
 
@@ -107,3 +143,23 @@ def get_search_regions(
         "left_centers": left_centers,
         "right_centers": right_centers,
     }
+
+
+def all_correlation_variants(base_cfg: BenchmarkConfig) -> list[BenchmarkConfig]:
+    """
+    Generate the standard correlation benchmark set:
+    6 normalization variants x 2 width modes = 12 variants.
+    """
+    validate_config(base_cfg)
+
+    variants: list[BenchmarkConfig] = []
+    for width_mode in WIDTH_MODES:
+        for normalization_mode in NORMALIZATION_MODES:
+            variants.append(
+                replace(
+                    base_cfg,
+                    width_mode=width_mode,
+                    normalization_mode=normalization_mode,
+                )
+            )
+    return variants

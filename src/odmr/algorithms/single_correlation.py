@@ -2,29 +2,42 @@ from __future__ import annotations
 
 import numpy as np
 
-from odmr.benchmark_config import BenchmarkConfig, get_search_regions, get_width_candidates, with_overrides
+from odmr.benchmark_config import (
+    BenchmarkConfig,
+    get_search_regions,
+    get_width_candidates,
+    variant_label,
+    with_overrides,
+)
+from odmr.algorithms.common import (
+    correlate_same,
+    lorentzian_peak,
+    peak_from_dip,
+    process_signal_for_correlation,
+    process_template_for_correlation,
+)
 
 
-def peak_from_dip(y_dip: np.ndarray) -> np.ndarray:
-    """Convert dip-form ODMR data into peak-form."""
-    return 1.0 - np.asarray(y_dip, dtype=float)
+def _legacy_to_normalization_mode(
+    normalize_template: bool | None,
+    demean: bool | None,
+) -> str | None:
+    """
+    Backward-compatibility bridge from the old boolean API.
+    """
+    if normalize_template is None and demean is None:
+        return None
 
+    nrm = bool(normalize_template) if normalize_template is not None else False
+    dm = bool(demean) if demean is not None else False
 
-def lorentzian_peak(
-    x: np.ndarray,
-    center: float,
-    gamma: float,
-    height: float,
-) -> np.ndarray:
-    """Lorentzian peak with gamma interpreted as a width parameter."""
-    return height / (1.0 + ((x - center) / gamma) ** 2)
-
-
-def correlate_same(y: np.ndarray, template: np.ndarray) -> np.ndarray:
-    """Simple same-length correlation using NumPy only."""
-    full = np.correlate(y, template, mode="full")
-    start = (len(full) - len(y)) // 2
-    return full[start:start + len(y)]
+    if not dm and not nrm:
+        return "raw"
+    if not dm and nrm:
+        return "l2"
+    if dm and not nrm:
+        return "demean"
+    return "demean_l2"
 
 
 def run_single_correlation(
@@ -32,6 +45,7 @@ def run_single_correlation(
     y_dip: np.ndarray,
     *,
     cfg: BenchmarkConfig | None = None,
+    normalization_mode: str | None = None,
     min_width: float | None = None,
     max_width: float | None = None,
     width_step: float | None = None,
@@ -42,29 +56,31 @@ def run_single_correlation(
     """
     Single-correlation ODMR estimator.
 
-    This keeps backward compatibility with the earlier simple call signature,
-    but now also supports a shared BenchmarkConfig.
+    Current benchmark variants are controlled through cfg.normalization_mode.
+
+    Backward compatibility:
+    - old normalize_template / demean booleans still map into the new mode system
     """
     if cfg is None:
         cfg = BenchmarkConfig()
 
+    if normalization_mode is None:
+        normalization_mode = _legacy_to_normalization_mode(normalize_template, demean)
+
     cfg = with_overrides(
         cfg,
+        normalization_mode=normalization_mode,
         min_width=min_width,
         max_width=max_width,
         width_step=width_step,
         template_height=template_height,
-        normalize_template=normalize_template,
-        demean=demean,
     )
 
     x = np.asarray(x, dtype=float)
-    y = peak_from_dip(y_dip)
+    y_peak = peak_from_dip(y_dip)
+    y_proc = process_signal_for_correlation(y_peak, cfg.normalization_mode)
 
-    if cfg.demean:
-        y = y - np.mean(y)
-
-    regions = get_search_regions(x, y, cfg)
+    regions = get_search_regions(x, y_peak, cfg)
     left_slice = regions["left_slice"]
     right_slice = regions["right_slice"]
 
@@ -77,17 +93,10 @@ def run_single_correlation(
     for gamma in width_candidates:
         gamma = float(gamma)
 
-        template = lorentzian_peak(x, xmid, gamma, cfg.template_height)
+        template_raw = lorentzian_peak(x, xmid, gamma, cfg.template_height)
+        template_proc = process_template_for_correlation(template_raw, cfg.normalization_mode)
 
-        if cfg.demean:
-            template = template - np.mean(template)
-
-        if cfg.normalize_template:
-            nrm = np.linalg.norm(template)
-            if nrm > 0:
-                template = template / nrm
-
-        corr = correlate_same(y, template)
+        corr = correlate_same(y_proc, template_proc)
 
         left_corr = corr[left_slice]
         right_corr = corr[right_slice]
@@ -109,7 +118,7 @@ def run_single_correlation(
 
     return {
         "name": "SingleCorrelation",
-        "benchmark_variant": f"{'norm' if cfg.normalize_template else 'raw'}_{cfg.width_mode}",
+        "benchmark_variant": variant_label(cfg),
         "f1_hat": f1_hat,
         "f2_hat": f2_hat,
         "gamma_left": float(best_left[0]),

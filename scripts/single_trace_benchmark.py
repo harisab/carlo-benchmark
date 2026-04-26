@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from odmr.simulation import generate_random_odmr_trace
-from odmr.benchmark_config import BenchmarkConfig
+from odmr.benchmark_config import BenchmarkConfig, all_correlation_variants
 from odmr.algorithms.single_correlation import run_single_correlation
 from odmr.algorithms.double_correlation import run_double_correlation
 
@@ -42,14 +42,13 @@ def main() -> None:
     print(f"  width     = {truth['width']:.3f} MHz")
     print()
 
-    benchmark_variants = [
-        BenchmarkConfig(normalize_template=False, width_mode="scan", standard_width=20.0),
-        BenchmarkConfig(normalize_template=True,  width_mode="scan", standard_width=20.0),
-        BenchmarkConfig(normalize_template=False, width_mode="fixed", standard_width=20.0),
-        BenchmarkConfig(normalize_template=True,  width_mode="fixed", standard_width=20.0),
-    ]
+    base_cfg = BenchmarkConfig(
+        standard_width=20.0,
+        template_height=1.0,
+        require_one_peak_per_side=True,
+    )
 
-    for cfg in benchmark_variants:
+    for cfg in all_correlation_variants(base_cfg):
         result_single = run_single_correlation(x, y_dip, cfg=cfg)
         print_result("SingleCorrelation", result_single, truth)
 
