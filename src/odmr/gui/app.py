@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -26,26 +27,26 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QComboBox,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from odmr.benchmark_config import (
-    BenchmarkConfig,
-    all_correlation_variants,
-    variant_label,
+from odmr.benchmark_config import BenchmarkConfig
+from odmr.benchmark_registry import (
+    build_jobs_from_rows,
+    build_variant_rows,
+    default_template_height,
+    get_algorithm_spec_map,
+    record_key,
+    row_key,
+    run_algorithm_job,
 )
-from odmr.simulation import generate_random_odmr_trace
-from odmr.algorithms.single_correlation import run_single_correlation
-from odmr.algorithms.double_correlation import run_double_correlation
 from odmr.algorithms.common import lorentzian_peak
+from odmr.simulation import generate_random_odmr_trace
 
 
 TRUTH_COLOR = "limegreen"
-SINGLE_COLOR = "gold"
-DOUBLE_COLOR = "cyan"
 
 
 def apply_modern_dark(app) -> None:
@@ -167,18 +168,8 @@ class BenchmarkWorker(QObject):
                     self.cancelled.emit(records)
                     return
 
-                algo_name = job["algorithm"]
-                cfg = job["cfg"]
-
                 t0 = time.perf_counter()
-
-                if algo_name == "SingleCorrelation":
-                    result = run_single_correlation(self.x, self.y_dip, cfg=cfg)
-                elif algo_name == "DoubleCorrelation":
-                    result = run_double_correlation(self.x, self.y_dip, cfg=cfg)
-                else:
-                    raise ValueError(f"Unsupported algorithm: {algo_name}")
-
+                result = run_algorithm_job(job, self.x, self.y_dip)
                 runtime_ms = 1000.0 * (time.perf_counter() - t0)
 
                 e1 = abs(float(result["f1_hat"]) - float(self.truth["resonance_value1"]))
@@ -194,8 +185,6 @@ class BenchmarkWorker(QObject):
                     {
                         "algorithm": result["name"],
                         "variant": result["benchmark_variant"],
-                        "normalization_mode": cfg.normalization_mode,
-                        "width_mode": cfg.width_mode,
                         "f1_hat": float(result["f1_hat"]),
                         "f2_hat": float(result["f2_hat"]),
                         "gamma_repr": gamma_repr,
@@ -209,7 +198,7 @@ class BenchmarkWorker(QObject):
                 )
 
                 done += 1
-                self.progress.emit(done, total, f"{algo_name} | {cfg.normalization_mode}_{cfg.width_mode}")
+                self.progress.emit(done, total, f"{result['name']} | {result['benchmark_variant']}")
 
             self.finished.emit(records)
 
@@ -218,8 +207,6 @@ class BenchmarkWorker(QObject):
 
 
 class MainWindow(QMainWindow):
-    ALGORITHM_NAMES = ["SingleCorrelation", "DoubleCorrelation"]
-
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ODMR Correlation GUI")
@@ -230,6 +217,7 @@ class MainWindow(QMainWindow):
 
         self.records_by_key: dict[str, dict[str, Any]] = {}
         self.all_records: list[dict[str, Any]] = []
+        self.algorithm_specs = get_algorithm_spec_map()
 
         self._worker_thread: QThread | None = None
         self._worker: BenchmarkWorker | None = None
@@ -377,7 +365,7 @@ class MainWindow(QMainWindow):
         self.ds_template_height = QDoubleSpinBox()
         self.ds_template_height.setRange(0.0, 10.0)
         self.ds_template_height.setDecimals(6)
-        self.ds_template_height.setValue(1.0)
+        self.ds_template_height.setValue(float(self.ds_p.value()))
 
         self.sp_center_step = QSpinBox()
         self.sp_center_step.setRange(1, 100)
@@ -406,21 +394,28 @@ class MainWindow(QMainWindow):
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setEnabled(False)
 
+        self.cmb_bar_order = QComboBox()
+        self.cmb_bar_order.addItems(["table_order", "best_first"])
+        self.cmb_bar_order.setCurrentText("best_first")
+        self.cmb_bar_order.currentIndexChanged.connect(lambda _i: self._update_error_chart())
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
 
         self.lbl_progress = QLabel("Idle")
 
-        self.btn_generate.clicked.connect(self._on_generate)
-        self.btn_run_selected.clicked.connect(self._on_run_selected)
-        self.btn_cancel.clicked.connect(self._on_cancel)
-
         layout.addWidget(self.btn_generate)
         layout.addWidget(self.btn_run_selected)
         layout.addWidget(self.btn_cancel)
+        layout.addWidget(QLabel("Bar chart order"))
+        layout.addWidget(self.cmb_bar_order)
         layout.addWidget(self.progress)
         layout.addWidget(self.lbl_progress)
+
+        self.btn_generate.clicked.connect(self._on_generate)
+        self.btn_run_selected.clicked.connect(self._on_run_selected)
+        self.btn_cancel.clicked.connect(self._on_cancel)
 
         return g
 
@@ -456,22 +451,18 @@ class MainWindow(QMainWindow):
             "seed": int(self.sp_seed.value()),
         }
 
-    def _cfg_from_ui(self) -> dict[str, float | int | str | bool]:
-        return {
-            "min_width": float(self.ds_min_width.value()),
-            "max_width": float(self.ds_max_width.value()),
-            "width_step": float(self.ds_width_step.value()),
-            "standard_width": float(self.ds_standard_width.value()),
-            "width_mode": "scan",
-            "template_height": float(self.ds_template_height.value()),
-            "normalization_mode": "raw",
-            "center_step_bins": int(self.sp_center_step.value()),
-            "require_one_peak_per_side": (self.cmb_require_side.currentText() == "true"),
-        }
-
-    def _all_standard_variants(self) -> list[BenchmarkConfig]:
-        base_cfg = BenchmarkConfig(**self._cfg_from_ui())
-        return all_correlation_variants(base_cfg)
+    def _base_cfg(self) -> BenchmarkConfig:
+        return BenchmarkConfig(
+            min_width=float(self.ds_min_width.value()),
+            max_width=float(self.ds_max_width.value()),
+            width_step=float(self.ds_width_step.value()),
+            standard_width=float(self.ds_standard_width.value()),
+            width_mode="scan",
+            template_height=float(self.ds_template_height.value()),
+            normalization_mode="raw",
+            center_step_bins=int(self.sp_center_step.value()),
+            require_one_peak_per_side=(self.cmb_require_side.currentText() == "true"),
+        )
 
     def _append_status(self, text: str) -> None:
         self.txt_status.appendPlainText(text)
@@ -479,50 +470,12 @@ class MainWindow(QMainWindow):
     def _clear_status(self) -> None:
         self.txt_status.setPlainText("")
 
-    def _row_key(self, spec: dict[str, Any]) -> str:
-        if spec["kind"] == "truth":
-            return "truth"
-        return f"variant:{spec['algorithm']}:{spec['variant']}"
-
-    def _variant_row_specs(self) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for algo_name in self.ALGORITHM_NAMES:
-            for cfg in self._all_standard_variants():
-                out.append(
-                    {
-                        "kind": "variant",
-                        "algorithm": algo_name,
-                        "variant": variant_label(cfg),
-                        "cfg": cfg,
-                    }
-                )
-        return out
-
-    def _selected_jobs(self) -> list[dict[str, Any]]:
-        jobs: list[dict[str, Any]] = []
-
-        for spec in self.row_specs:
-            key = self._row_key(spec)
-            if not self.row_run_states.get(key, False):
-                continue
-
-            if spec["kind"] == "variant":
-                jobs.append(
-                    {
-                        "algorithm": spec["algorithm"],
-                        "cfg": spec["cfg"],
-                    }
-                )
-
-        return jobs
-
     def _rebuild_main_table(self) -> None:
         old_run = dict(self.row_run_states)
         old_center = dict(self.row_center_states)
         old_wave = dict(self.row_wave_states)
 
-        self.row_specs = [{"kind": "truth"}]
-        self.row_specs.extend(self._variant_row_specs())
+        self.row_specs = build_variant_rows(self._base_cfg())
 
         self.tbl_main.setRowCount(len(self.row_specs))
         self.row_run_states = {}
@@ -530,16 +483,17 @@ class MainWindow(QMainWindow):
         self.row_wave_states = {}
 
         for row, spec in enumerate(self.row_specs):
-            key = self._row_key(spec)
+            key = row_key(spec)
 
             if spec["kind"] == "truth":
                 default_run = False
                 default_center = True
                 default_wave = False
             else:
-                default_run = True
-                default_center = False
-                default_wave = False
+                algo_defaults = self.algorithm_specs[spec["algorithm"]]
+                default_run = algo_defaults.default_run
+                default_center = algo_defaults.default_show_center
+                default_wave = algo_defaults.default_show_wave
 
             self.row_run_states[key] = old_run.get(key, default_run)
             self.row_center_states[key] = old_center.get(key, default_center)
@@ -555,24 +509,12 @@ class MainWindow(QMainWindow):
         return ck
 
     def _populate_row(self, row: int, spec: dict[str, Any]) -> None:
-        key = self._row_key(spec)
+        key = row_key(spec)
 
         run_enabled = spec["kind"] != "truth"
-        run_ck = self._checkbox(
-            self.row_run_states[key],
-            run_enabled,
-            lambda _state, k=key: self._on_run_checkbox_changed(k),
-        )
-        center_ck = self._checkbox(
-            self.row_center_states[key],
-            True,
-            lambda _state, k=key: self._on_center_checkbox_changed(k),
-        )
-        wave_ck = self._checkbox(
-            self.row_wave_states[key],
-            True,
-            lambda _state, k=key: self._on_wave_checkbox_changed(k),
-        )
+        run_ck = self._checkbox(self.row_run_states[key], run_enabled, lambda _s, k=key: self._on_run_checkbox_changed(k))
+        center_ck = self._checkbox(self.row_center_states[key], True, lambda _s, k=key: self._on_center_checkbox_changed(k))
+        wave_ck = self._checkbox(self.row_wave_states[key], True, lambda _s, k=key: self._on_wave_checkbox_changed(k))
 
         self.tbl_main.setCellWidget(row, 2, run_ck)
         self.tbl_main.setCellWidget(row, 3, center_ck)
@@ -595,7 +537,7 @@ class MainWindow(QMainWindow):
 
         algo_name = spec["algorithm"]
         variant = spec["variant"]
-        rec = self.records_by_key.get(f"{algo_name}:{variant}")
+        rec = self.records_by_key.get(record_key(algo_name, variant))
 
         self.tbl_main.setItem(row, 0, _table_item(algo_name))
         self.tbl_main.setItem(row, 1, _table_item(variant))
@@ -608,7 +550,7 @@ class MainWindow(QMainWindow):
         self.tbl_main.setItem(row, 11, _table_item(f"{rec['mean_err']:.3f}" if rec else ""))
 
     def _update_records(self, records: list[dict[str, Any]]) -> None:
-        self.records_by_key = {f"{r['algorithm']}:{r['variant']}": r for r in records}
+        self.records_by_key = {record_key(r["algorithm"], r["variant"]): r for r in records}
 
     def _update_error_chart(self) -> None:
         ax = self.canvas_err.ax
@@ -621,7 +563,19 @@ class MainWindow(QMainWindow):
             self.canvas_err.draw_idle()
             return
 
-        ordered = sorted(self.all_records, key=lambda r: (r["mean_err"], r["algorithm"], r["variant"]))
+        mode = self.cmb_bar_order.currentText()
+
+        if mode == "table_order":
+            ordered = []
+            for spec in self.row_specs:
+                if spec["kind"] != "variant":
+                    continue
+                rec = self.records_by_key.get(record_key(spec["algorithm"], spec["variant"]))
+                if rec is not None:
+                    ordered.append(rec)
+        else:
+            ordered = sorted(self.all_records, key=lambda r: (r["mean_err"], r["algorithm"], r["variant"]))
+
         labels = [f"{r['algorithm']} | {r['variant']}" for r in ordered]
         values = [r["mean_err"] for r in ordered]
 
@@ -651,13 +605,8 @@ class MainWindow(QMainWindow):
 
         ax.scatter(x, y, s=12, label="data")
 
-        color_map = {
-            "SingleCorrelation": SINGLE_COLOR,
-            "DoubleCorrelation": DOUBLE_COLOR,
-        }
-
         for spec in self.row_specs:
-            key = self._row_key(spec)
+            key = row_key(spec)
             show_center = self.row_center_states.get(key, False)
             show_wave = self.row_wave_states.get(key, False)
 
@@ -681,31 +630,34 @@ class MainWindow(QMainWindow):
 
             algo_name = spec["algorithm"]
             variant = spec["variant"]
-            rec = self.records_by_key.get(f"{algo_name}:{variant}")
+            rec = self.records_by_key.get(record_key(algo_name, variant))
             if rec is None:
                 continue
 
             result = rec["result"]
-            color = color_map[algo_name]
+            color = self.algorithm_specs[algo_name].color
 
             if show_center:
                 ax.axvline(float(result["f1_hat"]), linestyle=":", linewidth=1.8, color=color, label=f"{algo_name} {variant} f1")
                 ax.axvline(float(result["f2_hat"]), linestyle=":", linewidth=1.8, color=color, label=f"{algo_name} {variant} f2")
 
             if show_wave:
-                if algo_name == "SingleCorrelation":
-                    gamma = 0.5 * (float(result["gamma_left"]) + float(result["gamma_right"]))
+                if "best_fit" in result:
+                    ax.plot(x, np.asarray(result["best_fit"], dtype=float), linewidth=2.0, color=color, label=f"{algo_name} {variant} wave")
                 else:
-                    gamma = float(result["gamma"])
+                    if "gamma_left" in result:
+                        gamma = 0.5 * (float(result["gamma_left"]) + float(result["gamma_right"]))
+                    else:
+                        gamma = float(result["gamma"])
 
-                y_model = template_dip_from_params(
-                    x,
-                    float(result["f1_hat"]),
-                    float(result["f2_hat"]),
-                    gamma,
-                    contrast,
-                )
-                ax.plot(x, y_model, linewidth=2.0, color=color, label=f"{algo_name} {variant} wave")
+                    y_model = template_dip_from_params(
+                        x,
+                        float(result["f1_hat"]),
+                        float(result["f2_hat"]),
+                        gamma,
+                        contrast,
+                    )
+                    ax.plot(x, y_model, linewidth=2.0, color=color, label=f"{algo_name} {variant} wave")
 
         ax.legend(fontsize=8, loc="best")
         self.canvas.draw_idle()
@@ -814,6 +766,7 @@ class MainWindow(QMainWindow):
         self.all_records = []
 
         self.sp_seed.setValue(min(self.sp_seed.maximum(), used_seed + 1))
+        self.ds_template_height.setValue(default_template_height(truth["success_probability_at_resonance"]))
 
         self.lbl_truth.setText(
             "Truth: "
@@ -837,7 +790,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_run_selected(self) -> None:
         self._rebuild_main_table()
-        self._start_worker(self._selected_jobs())
+        self._start_worker(build_jobs_from_rows(self.row_specs, self.row_run_states))
 
     @Slot()
     def _on_cancel(self) -> None:
@@ -847,7 +800,7 @@ class MainWindow(QMainWindow):
 
     def _find_row_index(self, key: str) -> int | None:
         for idx, spec in enumerate(self.row_specs):
-            if self._row_key(spec) == key:
+            if row_key(spec) == key:
                 return idx
         return None
 

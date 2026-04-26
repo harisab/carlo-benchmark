@@ -14,7 +14,8 @@ dependencies = [
     "matplotlib",
     "pandas",
     "scikit-learn",
-    "tqdm"
+    "tqdm",
+    "lmfit"
 ]
 
 [project.optional-dependencies]
