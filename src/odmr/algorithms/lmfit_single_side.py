@@ -3,7 +3,8 @@ from __future__ import annotations
 import numpy as np
 from lmfit import Model
 
-from odmr.benchmark_config import BenchmarkConfig
+from odmr.project_defaults import BenchmarkConfig
+from odmr.algorithms.common import split_left_right_indices
 
 
 def single_lorentzian_dip(
@@ -24,9 +25,6 @@ def _fit_one_side(
     gamma_min: float,
     gamma_max: float,
 ) -> tuple[object, dict[str, float]]:
-    x = np.asarray(x, dtype=float)
-    y_dip = np.asarray(y_dip, dtype=float)
-
     i0 = int(np.argmin(y_dip))
     baseline0 = float(np.median(y_dip))
     amp0 = float(max(1e-4, baseline0 - y_dip[i0]))
@@ -49,8 +47,6 @@ def _fit_one_side(
 
     best = result.best_values
     return result, {
-        "baseline": float(best["baseline"]),
-        "amplitude": float(best["amplitude"]),
         "f0": float(best["f0"]),
         "gamma": float(best["gamma"]),
     }
@@ -62,21 +58,20 @@ def run_lmfit_single_side(
     *,
     cfg: BenchmarkConfig | None = None,
 ) -> dict:
-    """
-    Independent left/right single-Lorentzian fits.
-    This is the lmfit analogue of SingleCorrelation.
-    """
     if cfg is None:
         cfg = BenchmarkConfig()
 
     x = np.asarray(x, dtype=float)
     y_dip = np.asarray(y_dip, dtype=float)
 
-    mid = len(x) // 2
-    x_left = x[:mid]
-    y_left = y_dip[:mid]
-    x_right = x[mid:]
-    y_right = y_dip[mid:]
+    left_indices, right_indices = split_left_right_indices(len(x), 1)
+    left_slice = slice(int(left_indices[0]), int(left_indices[-1]) + 1)
+    right_slice = slice(int(right_indices[0]), int(right_indices[-1]) + 1)
+
+    x_left = x[left_slice]
+    y_left = y_dip[left_slice]
+    x_right = x[right_slice]
+    y_right = y_dip[right_slice]
 
     gamma0 = float(cfg.standard_width)
     gamma0 = max(float(cfg.min_width), min(float(cfg.max_width), gamma0))
@@ -96,22 +91,17 @@ def run_lmfit_single_side(
         gamma_max=float(cfg.max_width),
     )
 
-    f1_hat = float(left_best["f0"])
-    f2_hat = float(right_best["f0"])
-    if f1_hat > f2_hat:
-        f1_hat, f2_hat = f2_hat, f1_hat
-
     best_fit = np.empty_like(y_dip, dtype=float)
-    best_fit[:mid] = np.asarray(left_fit.best_fit, dtype=float)
-    best_fit[mid:] = np.asarray(right_fit.best_fit, dtype=float)
+    best_fit[left_slice] = np.asarray(left_fit.best_fit, dtype=float)
+    best_fit[right_slice] = np.asarray(right_fit.best_fit, dtype=float)
 
     chisqr_total = float(left_fit.chisqr + right_fit.chisqr)
 
     return {
         "name": "LMFitSinglePerSide",
         "benchmark_variant": "lmfit_single_side",
-        "f1_hat": f1_hat,
-        "f2_hat": f2_hat,
+        "f1_hat": float(left_best["f0"]),
+        "f2_hat": float(right_best["f0"]),
         "gamma_left": float(left_best["gamma"]),
         "gamma_right": float(right_best["gamma"]),
         "score": -chisqr_total,

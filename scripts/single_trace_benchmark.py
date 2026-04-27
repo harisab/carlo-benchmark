@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from odmr.simulation import generate_random_odmr_trace
-from odmr.benchmark_config import BenchmarkConfig
-from odmr.benchmark_registry import (
+from odmr.project_defaults import (
+    SIMULATION_DEFAULTS,
+    BenchmarkConfig,
     build_jobs_from_rows,
-    build_variant_rows,
+    build_row_specs,
     default_template_height,
     run_algorithm_job,
 )
@@ -38,7 +39,7 @@ def print_result(label: str, result: dict, truth: dict) -> None:
 
 
 def main() -> None:
-    x, y_dip, truth = generate_random_odmr_trace(seed=123)
+    x, y_dip, truth = generate_random_odmr_trace(seed=int(SIMULATION_DEFAULTS["seed"]))
 
     print("Truth")
     print(f"  f1        = {truth['resonance_value1']:.3f} MHz")
@@ -47,12 +48,10 @@ def main() -> None:
     print()
 
     base_cfg = BenchmarkConfig(
-        standard_width=20.0,
-        template_height=default_template_height(truth["success_probability_at_resonance"]),
-        require_one_peak_per_side=True,
+        template_height=default_template_height(truth["success_probability_at_resonance"])
     )
 
-    row_specs = build_variant_rows(base_cfg)
+    row_specs = build_row_specs(base_cfg)
     row_run_states = {
         ("truth" if spec["kind"] == "truth" else f"variant:{spec['algorithm']}:{spec['variant']}"): spec["kind"] == "variant"
         for spec in row_specs

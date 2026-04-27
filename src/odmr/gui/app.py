@@ -32,21 +32,21 @@ from PySide6.QtWidgets import (
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from odmr.benchmark_config import BenchmarkConfig
-from odmr.benchmark_registry import (
+from odmr.project_defaults import (
+    APP_DEFAULTS,
+    SIMULATION_DEFAULTS,
+    TRUTH_COLOR,
+    BenchmarkConfig,
     build_jobs_from_rows,
-    build_variant_rows,
+    build_row_specs,
     default_template_height,
     get_algorithm_spec_map,
     record_key,
     row_key,
     run_algorithm_job,
 )
-from odmr.algorithms.common import lorentzian_peak
+from odmr.algorithms.common import two_peak_dip
 from odmr.simulation import generate_random_odmr_trace
-
-
-TRUTH_COLOR = "limegreen"
 
 
 def apply_modern_dark(app) -> None:
@@ -117,19 +117,6 @@ def _table_item(text: str) -> QTableWidgetItem:
     item = QTableWidgetItem(text)
     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
     return item
-
-
-def template_dip_from_params(
-    x: np.ndarray,
-    f1: float,
-    f2: float,
-    gamma: float,
-    height: float,
-) -> np.ndarray:
-    return 1.0 - (
-        lorentzian_peak(x, f1, gamma, height) +
-        lorentzian_peak(x, f2, gamma, height)
-    )
 
 
 class BenchmarkWorker(QObject):
@@ -209,7 +196,7 @@ class BenchmarkWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ODMR Correlation GUI")
+        self.setWindowTitle(str(APP_DEFAULTS["window_title"]))
 
         self.current_x: np.ndarray | None = None
         self.current_y_dip: np.ndarray | None = None
@@ -251,7 +238,7 @@ class MainWindow(QMainWindow):
         graphs_splitter = QSplitter(Qt.Horizontal)
         graphs_splitter.addWidget(self.canvas)
         graphs_splitter.addWidget(self.canvas_err)
-        graphs_splitter.setSizes([950, 650])
+        graphs_splitter.setSizes(list(APP_DEFAULTS["graph_splitter_sizes"]))
 
         left_layout.addWidget(self.lbl_truth)
         left_layout.addWidget(graphs_splitter, stretch=1)
@@ -266,7 +253,7 @@ class MainWindow(QMainWindow):
         bottom_splitter = QSplitter(Qt.Horizontal)
         bottom_splitter.addWidget(left_panel)
         bottom_splitter.addWidget(right_panel)
-        bottom_splitter.setSizes([1600, 400])
+        bottom_splitter.setSizes(list(APP_DEFAULTS["bottom_splitter_sizes"]))
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -281,49 +268,49 @@ class MainWindow(QMainWindow):
 
         self.sp_bins = QSpinBox()
         self.sp_bins.setRange(50, 5000)
-        self.sp_bins.setValue(199)
+        self.sp_bins.setValue(int(SIMULATION_DEFAULTS["num_points"]))
 
         self.sp_tries = QSpinBox()
         self.sp_tries.setRange(1, 1000)
-        self.sp_tries.setValue(20)
+        self.sp_tries.setValue(int(SIMULATION_DEFAULTS["num_tries"]))
 
         self.ds_start = QDoubleSpinBox()
         self.ds_start.setRange(0.0, 1e9)
         self.ds_start.setDecimals(3)
-        self.ds_start.setValue(3000.0)
+        self.ds_start.setValue(float(SIMULATION_DEFAULTS["range_start"]))
 
         self.ds_end = QDoubleSpinBox()
         self.ds_end.setRange(0.0, 1e9)
         self.ds_end.setDecimals(3)
-        self.ds_end.setValue(4000.0)
+        self.ds_end.setValue(float(SIMULATION_DEFAULTS["range_end"]))
 
         self.ds_center = QDoubleSpinBox()
         self.ds_center.setRange(0.0, 1e9)
         self.ds_center.setDecimals(3)
-        self.ds_center.setValue(3500.0)
+        self.ds_center.setValue(float(SIMULATION_DEFAULTS["center_frequency"]))
 
         self.ds_offset = QDoubleSpinBox()
         self.ds_offset.setRange(0.0, 1e6)
         self.ds_offset.setDecimals(3)
-        self.ds_offset.setValue(450.0)
+        self.ds_offset.setValue(float(SIMULATION_DEFAULTS["offset_max"]))
 
         self.ds_p = QDoubleSpinBox()
         self.ds_p.setRange(1e-6, 0.99)
         self.ds_p.setDecimals(6)
         self.ds_p.setSingleStep(0.01)
-        self.ds_p.setValue(0.15)
+        self.ds_p.setValue(float(SIMULATION_DEFAULTS["success_probability_at_resonance"]))
 
         self.ds_wmin = QSpinBox()
         self.ds_wmin.setRange(1, 100000)
-        self.ds_wmin.setValue(10)
+        self.ds_wmin.setValue(int(SIMULATION_DEFAULTS["width_min"]))
 
         self.ds_wmax = QSpinBox()
         self.ds_wmax.setRange(1, 100000)
-        self.ds_wmax.setValue(50)
+        self.ds_wmax.setValue(int(SIMULATION_DEFAULTS["width_max"]))
 
         self.sp_seed = QSpinBox()
         self.sp_seed.setRange(0, 2_000_000_000)
-        self.sp_seed.setValue(123)
+        self.sp_seed.setValue(int(SIMULATION_DEFAULTS["seed"]))
 
         form.addRow("n_bins", self.sp_bins)
         form.addRow("n_tries", self.sp_tries)
@@ -342,38 +329,42 @@ class MainWindow(QMainWindow):
         g = QGroupBox("Benchmark config")
         form = QFormLayout(g)
 
+        defaults = BenchmarkConfig(
+            template_height=default_template_height(float(self.ds_p.value()))
+        )
+
         self.ds_standard_width = QDoubleSpinBox()
         self.ds_standard_width.setRange(1e-6, 1e6)
         self.ds_standard_width.setDecimals(3)
-        self.ds_standard_width.setValue(20.0)
+        self.ds_standard_width.setValue(defaults.standard_width)
 
         self.ds_min_width = QDoubleSpinBox()
         self.ds_min_width.setRange(1e-6, 1e6)
         self.ds_min_width.setDecimals(3)
-        self.ds_min_width.setValue(10.0)
+        self.ds_min_width.setValue(defaults.min_width)
 
         self.ds_max_width = QDoubleSpinBox()
         self.ds_max_width.setRange(1e-6, 1e6)
         self.ds_max_width.setDecimals(3)
-        self.ds_max_width.setValue(50.0)
+        self.ds_max_width.setValue(defaults.max_width)
 
         self.ds_width_step = QDoubleSpinBox()
         self.ds_width_step.setRange(1e-6, 1e6)
         self.ds_width_step.setDecimals(3)
-        self.ds_width_step.setValue(1.0)
+        self.ds_width_step.setValue(defaults.width_step)
 
         self.ds_template_height = QDoubleSpinBox()
         self.ds_template_height.setRange(0.0, 10.0)
         self.ds_template_height.setDecimals(6)
-        self.ds_template_height.setValue(float(self.ds_p.value()))
+        self.ds_template_height.setValue(default_template_height(float(self.ds_p.value())))
 
         self.sp_center_step = QSpinBox()
         self.sp_center_step.setRange(1, 100)
-        self.sp_center_step.setValue(1)
+        self.sp_center_step.setValue(defaults.center_step_bins)
 
         self.cmb_require_side = QComboBox()
         self.cmb_require_side.addItems(["true", "false"])
-        self.cmb_require_side.setCurrentText("true")
+        self.cmb_require_side.setCurrentText("true" if defaults.require_one_peak_per_side else "false")
 
         form.addRow("standard_width", self.ds_standard_width)
         form.addRow("min_width", self.ds_min_width)
@@ -396,7 +387,7 @@ class MainWindow(QMainWindow):
 
         self.cmb_bar_order = QComboBox()
         self.cmb_bar_order.addItems(["table_order", "best_first"])
-        self.cmb_bar_order.setCurrentText("best_first")
+        self.cmb_bar_order.setCurrentText(str(APP_DEFAULTS["bar_order"]))
         self.cmb_bar_order.currentIndexChanged.connect(lambda _i: self._update_error_chart())
 
         self.progress = QProgressBar()
@@ -475,7 +466,7 @@ class MainWindow(QMainWindow):
         old_center = dict(self.row_center_states)
         old_wave = dict(self.row_wave_states)
 
-        self.row_specs = build_variant_rows(self._base_cfg())
+        self.row_specs = build_row_specs(self._base_cfg())
 
         self.tbl_main.setRowCount(len(self.row_specs))
         self.row_run_states = {}
@@ -618,7 +609,7 @@ class MainWindow(QMainWindow):
                     ax.axvline(float(truth["resonance_value1"]), linestyle="--", linewidth=1.8, color=TRUTH_COLOR, label="truth f1")
                     ax.axvline(float(truth["resonance_value2"]), linestyle="--", linewidth=1.8, color=TRUTH_COLOR, label="truth f2")
                 if show_wave:
-                    y_truth = template_dip_from_params(
+                    y_truth = two_peak_dip(
                         x,
                         float(truth["resonance_value1"]),
                         float(truth["resonance_value2"]),
@@ -650,7 +641,7 @@ class MainWindow(QMainWindow):
                     else:
                         gamma = float(result["gamma"])
 
-                    y_model = template_dip_from_params(
+                    y_model = two_peak_dip(
                         x,
                         float(result["f1_hat"]),
                         float(result["f2_hat"]),

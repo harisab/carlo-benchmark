@@ -2,41 +2,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from odmr.benchmark_config import (
-    BenchmarkConfig,
-    get_search_regions,
-    get_width_candidates,
-    variant_label,
-    with_overrides,
-)
+from odmr.project_defaults import BenchmarkConfig, variant_label
 from odmr.algorithms.common import (
+    candidate_widths,
     lorentzian_peak,
-    peak_from_dip,
-    process_signal_for_correlation,
-    process_template_for_correlation,
+    peak_space,
+    process_vector,
+    split_left_right_indices,
+    template_score,
+    two_peak_dip,
 )
-
-
-def _legacy_to_normalization_mode(
-    normalize_template: bool | None,
-    demean: bool | None,
-) -> str | None:
-    """
-    Backward-compatibility bridge from the old boolean API.
-    """
-    if normalize_template is None and demean is None:
-        return None
-
-    nrm = bool(normalize_template) if normalize_template is not None else False
-    dm = bool(demean) if demean is not None else False
-
-    if not dm and not nrm:
-        return "raw"
-    if not dm and nrm:
-        return "l2"
-    if dm and not nrm:
-        return "demean"
-    return "demean_l2"
 
 
 def run_double_correlation(
@@ -44,93 +19,58 @@ def run_double_correlation(
     y_dip: np.ndarray,
     *,
     cfg: BenchmarkConfig | None = None,
-    normalization_mode: str | None = None,
-    min_width: float | None = None,
-    max_width: float | None = None,
-    width_step: float | None = None,
-    template_height: float | None = None,
-    normalize_template: bool | None = None,
-    demean: bool | None = None,
-    center_step_bins: int | None = None,
-    restrict_window_mhz: float | None = None,
 ) -> dict:
-    """
-    Double-correlation ODMR estimator.
-
-    Current benchmark variants are controlled through cfg.normalization_mode.
-
-    For correctness across raw / l1 / l2 / demean / demean_l1 / demean_l2,
-    the pairwise score is computed from the combined two-peak kernel.
-    """
     if cfg is None:
         cfg = BenchmarkConfig()
 
-    if normalization_mode is None:
-        normalization_mode = _legacy_to_normalization_mode(normalize_template, demean)
-
-    cfg = with_overrides(
-        cfg,
-        normalization_mode=normalization_mode,
-        min_width=min_width,
-        max_width=max_width,
-        width_step=width_step,
-        template_height=template_height,
-        center_step_bins=center_step_bins,
-        restrict_window_mhz=restrict_window_mhz,
-    )
-
     x = np.asarray(x, dtype=float)
-    y_peak = peak_from_dip(y_dip)
-    y_proc = process_signal_for_correlation(y_peak, cfg.normalization_mode)
+    y_dip = np.asarray(y_dip, dtype=float)
 
-    regions = get_search_regions(x, y_peak, cfg)
-    left_centers = regions["left_centers"]
-    right_centers = regions["right_centers"]
+    widths = candidate_widths(cfg)
+    signal_processed = process_vector(peak_space(y_dip), cfg.normalization_mode)
 
-    width_candidates = get_width_candidates(cfg)
+    left_indices, right_indices = split_left_right_indices(len(x), cfg.center_step_bins)
+    if len(left_indices) == 0 or len(right_indices) == 0:
+        raise ValueError("Trace is too short to split into left and right halves.")
 
-    best = None  # (score, gamma, xL, xR)
+    best_score = -np.inf
+    best_f1 = float(x[left_indices[0]])
+    best_f2 = float(x[right_indices[0]])
+    best_gamma = float(widths[0])
 
-    for gamma in width_candidates:
-        gamma = float(gamma)
+    for gamma in widths:
+        for i_left in left_indices:
+            f1 = float(x[i_left])
+            left_template = lorentzian_peak(x, f1, float(gamma), float(cfg.template_height))
 
-        left_templates_raw = [
-            lorentzian_peak(x, float(c), gamma, cfg.template_height)
-            for c in left_centers
-        ]
-        right_templates_raw = [
-            lorentzian_peak(x, float(c), gamma, cfg.template_height)
-            for c in right_centers
-        ]
+            for i_right in right_indices:
+                f2 = float(x[i_right])
+                right_template = lorentzian_peak(x, f2, float(gamma), float(cfg.template_height))
+                template = left_template + right_template
+                template_processed = process_vector(template, cfg.normalization_mode)
+                score = template_score(signal_processed, template_processed)
 
-        for iL, xL in enumerate(left_centers):
-            tL = left_templates_raw[iL]
+                if score > best_score:
+                    best_score = score
+                    best_f1 = f1
+                    best_f2 = f2
+                    best_gamma = float(gamma)
 
-            for iR, xR in enumerate(right_centers):
-                tR = right_templates_raw[iR]
-
-                combined_raw = tL + tR
-                combined_proc = process_template_for_correlation(
-                    combined_raw,
-                    cfg.normalization_mode,
-                )
-
-                score = float(np.dot(y_proc, combined_proc))
-
-                if best is None or score > best[0]:
-                    best = (score, gamma, float(xL), float(xR))
-
-    if best is None:
-        raise RuntimeError("Double correlation failed to find a valid solution.")
-
-    score, gamma, xL, xR = best
+    best_fit = two_peak_dip(
+        x,
+        best_f1,
+        best_f2,
+        best_gamma,
+        float(cfg.template_height),
+    )
 
     return {
         "name": "DoubleCorrelation",
         "benchmark_variant": variant_label(cfg),
-        "f1_hat": float(min(xL, xR)),
-        "f2_hat": float(max(xL, xR)),
-        "gamma": float(gamma),
-        "score": float(score),
+        "f1_hat": float(best_f1),
+        "f2_hat": float(best_f2),
+        "gamma": float(best_gamma),
+        "score": float(best_score),
         "used_cfg": cfg,
+        "best_fit": np.asarray(best_fit, dtype=float),
     }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from lmfit import Model
 
-from odmr.benchmark_config import BenchmarkConfig
+from odmr.project_defaults import BenchmarkConfig
 
 
 def double_lorentzian_dip(
@@ -27,9 +27,6 @@ def _initial_guesses(
     y_dip: np.ndarray,
     cfg: BenchmarkConfig,
 ) -> dict[str, float]:
-    x = np.asarray(x, dtype=float)
-    y_dip = np.asarray(y_dip, dtype=float)
-
     y_peak = 1.0 - y_dip
     mid = len(x) // 2
 
@@ -59,10 +56,6 @@ def run_lmfit_double_joint(
     *,
     cfg: BenchmarkConfig | None = None,
 ) -> dict:
-    """
-    Joint two-peak lmfit model over the full trace.
-    This is the lmfit analogue of DoubleCorrelation.
-    """
     if cfg is None:
         cfg = BenchmarkConfig()
 
@@ -101,16 +94,11 @@ def run_lmfit_double_joint(
     result = model.fit(y_dip, params, x=x)
     best = result.best_values
 
-    f1_hat = float(best["f1"])
-    f2_hat = float(best["f2"])
-    if f1_hat > f2_hat:
-        f1_hat, f2_hat = f2_hat, f1_hat
-
     return {
         "name": "LMFitDoubleJoint",
         "benchmark_variant": "lmfit_double_joint",
-        "f1_hat": f1_hat,
-        "f2_hat": f2_hat,
+        "f1_hat": float(best["f1"]),
+        "f2_hat": float(best["f2"]),
         "gamma": float(best["gamma"]),
         "score": -float(result.chisqr),
         "used_cfg": cfg,
