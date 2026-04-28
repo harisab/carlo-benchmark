@@ -37,9 +37,9 @@ from odmr.project_defaults import (
     BENCHMARK_DEFAULTS,
     SIMULATION_DEFAULTS,
     TRUTH_COLOR,
+    BenchmarkConfig,
     build_jobs_from_rows,
     build_row_specs,
-    make_benchmark_config,
     plot_color_for_index,
     record_key,
     row_key,
@@ -328,8 +328,8 @@ class MainWindow(QMainWindow):
         g = QGroupBox("Benchmark config")
         form = QFormLayout(g)
 
-        defaults = make_benchmark_config(
-            success_probability_at_resonance=float(self.ds_p.value())
+        defaults = BenchmarkConfig(
+            template_height=float(self.ds_p.value())
         )
 
         self.ds_standard_width = QDoubleSpinBox()
@@ -453,22 +453,21 @@ class MainWindow(QMainWindow):
             "seed": int(self.sp_seed.value()),
         }
 
-    def _base_cfg(self):
-        if self.current_truth is not None:
-            success_prob = float(self.current_truth["success_probability_at_resonance"])
-        else:
-            success_prob = float(self.ds_p.value())
+    def _template_height_from_gui(self) -> float:
+        if self.ck_template_height_from_success_prob.isChecked():
+            if self.current_truth is not None:
+                return float(self.current_truth["success_probability_at_resonance"])
+            return float(self.ds_p.value())
 
-        return make_benchmark_config(
-            success_probability_at_resonance=success_prob,
-            template_height=float(self.ds_template_height.value()),
-            use_success_probability_for_template_height=(
-                self.ck_template_height_from_success_prob.isChecked()
-            ),
+        return float(self.ds_template_height.value())
+
+    def _base_cfg(self) -> BenchmarkConfig:
+        return BenchmarkConfig(
             min_width=float(self.ds_min_width.value()),
             max_width=float(self.ds_max_width.value()),
             width_step=float(self.ds_width_step.value()),
             standard_width=float(self.ds_standard_width.value()),
+            template_height=self._template_height_from_gui(),
             center_step_bins=int(self.sp_center_step.value()),
             require_one_peak_per_side=(self.cmb_require_side.currentText() == "true"),
         )

@@ -6,10 +6,10 @@ from odmr.simulation import generate_random_odmr_trace
 from odmr.project_defaults import (
     BENCHMARK_ALGORITHMS,
     SIMULATION_DEFAULTS,
+    BenchmarkConfig,
     build_jobs_from_rows,
     build_row_specs,
     default_row_run_states,
-    make_benchmark_config,
     run_algorithm_job,
 )
 
@@ -62,6 +62,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--template-height",
+        type=float,
+        default=None,
+        help=(
+            "Optional manual template height. "
+            "If omitted, template height uses the trace success probability."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -77,9 +87,12 @@ def main() -> None:
     print(f"  seed      = {truth['seed']}")
     print()
 
-    base_cfg = make_benchmark_config(
-        success_probability_at_resonance=float(truth["success_probability_at_resonance"])
-    )
+    if args.template_height is None:
+        template_height = float(truth["success_probability_at_resonance"])
+    else:
+        template_height = float(args.template_height)
+
+    base_cfg = BenchmarkConfig(template_height=template_height)
 
     row_specs = build_row_specs(base_cfg, algorithm_keys=args.algorithms)
     row_run_states = default_row_run_states(row_specs)

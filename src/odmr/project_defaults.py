@@ -46,7 +46,7 @@ BENCHMARK_DEFAULTS = {
     "max_width": 50.0,
     "width_step": 1.0,
     "standard_width": 30.0,
-    "template_height": SIMULATION_DEFAULTS["success_probability_at_resonance"],
+    "template_height": 1.0,
     "use_success_probability_for_template_height": True,
     "center_step_bins": 1,
     "require_one_peak_per_side": True,
@@ -66,8 +66,7 @@ APP_DEFAULTS = {
 
 TRUTH_COLOR = "limegreen"
 
-# Colors are not married to specific algorithms.
-# The GUI assigns them by table/row order as needed.
+# Colors are assigned by row/order, not permanently married to algorithms.
 PLOT_COLORS = (
     "magenta",
     "orange",
@@ -93,11 +92,13 @@ class BenchmarkConfig:
     """
     Concrete benchmark configuration passed to algorithms.
 
-    Important:
-    - width_mode is always concrete: "fixed" or "scan".
-    - normalization_mode is always concrete:
-      raw/l1/l2/demean/demean_l1/demean_l2.
-    - All variant expansion happens in build_row_specs().
+    width_mode is always concrete:
+        "fixed" or "scan"
+
+    normalization_mode is always concrete:
+        raw / l1 / l2 / demean / demean_l1 / demean_l2
+
+    All variant expansion happens in build_row_specs().
     """
 
     min_width: float = float(BENCHMARK_DEFAULTS["min_width"])
@@ -113,64 +114,6 @@ class BenchmarkConfig:
     require_one_peak_per_side: bool = bool(BENCHMARK_DEFAULTS["require_one_peak_per_side"])
 
 
-def resolve_template_height(
-    *,
-    success_probability_at_resonance: float | None,
-    template_height: float,
-    use_success_probability_for_template_height: bool,
-) -> float:
-    """
-    Decide template height from the central rule.
-
-    If use_success_probability_for_template_height is True, template height
-    follows the trace's success probability.
-
-    If False, the manually provided template_height is used.
-    """
-    if use_success_probability_for_template_height:
-        if success_probability_at_resonance is None:
-            return float(BENCHMARK_DEFAULTS["template_height"])
-        return float(success_probability_at_resonance)
-
-    return float(template_height)
-
-
-def make_benchmark_config(
-    *,
-    success_probability_at_resonance: float | None = None,
-    template_height: float = float(BENCHMARK_DEFAULTS["template_height"]),
-    use_success_probability_for_template_height: bool = bool(
-        BENCHMARK_DEFAULTS["use_success_probability_for_template_height"]
-    ),
-    min_width: float = float(BENCHMARK_DEFAULTS["min_width"]),
-    max_width: float = float(BENCHMARK_DEFAULTS["max_width"]),
-    width_step: float = float(BENCHMARK_DEFAULTS["width_step"]),
-    standard_width: float = float(BENCHMARK_DEFAULTS["standard_width"]),
-    center_step_bins: int = int(BENCHMARK_DEFAULTS["center_step_bins"]),
-    require_one_peak_per_side: bool = bool(BENCHMARK_DEFAULTS["require_one_peak_per_side"]),
-) -> BenchmarkConfig:
-    """
-    Build a concrete base config from project defaults and optional runtime inputs.
-
-    Correlation variants are expanded later by build_row_specs().
-    """
-    resolved_template_height = resolve_template_height(
-        success_probability_at_resonance=success_probability_at_resonance,
-        template_height=template_height,
-        use_success_probability_for_template_height=use_success_probability_for_template_height,
-    )
-
-    return BenchmarkConfig(
-        min_width=float(min_width),
-        max_width=float(max_width),
-        width_step=float(width_step),
-        standard_width=float(standard_width),
-        template_height=float(resolved_template_height),
-        center_step_bins=int(center_step_bins),
-        require_one_peak_per_side=bool(require_one_peak_per_side),
-    )
-
-
 # =============================================================================
 # Explicit benchmark design
 # =============================================================================
@@ -178,16 +121,6 @@ def make_benchmark_config(
 BENCHMARK_ALGORITHMS = (
     "LMFitSinglePerSide",
     "LMFitDoubleJoint",
-    "SingleCorrelation",
-    "DoubleCorrelation",
-)
-
-STANDALONE_VARIANTS = {
-    "LMFitSinglePerSide": "lmfit_single_side",
-    "LMFitDoubleJoint": "lmfit_double_joint",
-}
-
-CORRELATION_ALGORITHMS = (
     "SingleCorrelation",
     "DoubleCorrelation",
 )
@@ -232,12 +165,12 @@ def build_row_specs(
 
     By default:
     - truth row
-    - lmfit single-side
-    - lmfit double-joint
+    - LMFitSinglePerSide
+    - LMFitDoubleJoint
     - all SingleCorrelation variants
     - all DoubleCorrelation variants
 
-    If algorithm_keys is passed, only those algorithms are included.
+    algorithm_keys can be used by scripts to run only selected algorithms.
     """
     selected = set(algorithm_keys) if algorithm_keys is not None else None
 
@@ -248,7 +181,7 @@ def build_row_specs(
             {
                 "kind": "variant",
                 "algorithm": "LMFitSinglePerSide",
-                "variant": STANDALONE_VARIANTS["LMFitSinglePerSide"],
+                "variant": "lmfit_single_side",
                 "cfg": base_cfg,
             }
         )
@@ -258,7 +191,7 @@ def build_row_specs(
             {
                 "kind": "variant",
                 "algorithm": "LMFitDoubleJoint",
-                "variant": STANDALONE_VARIANTS["LMFitDoubleJoint"],
+                "variant": "lmfit_double_joint",
                 "cfg": base_cfg,
             }
         )
@@ -348,8 +281,8 @@ def run_algorithm_job(job: dict[str, Any], x, y_dip) -> dict:
     """
     Run one benchmark job.
 
-    Imports are local to avoid circular imports:
-    algorithm modules import BenchmarkConfig from this file.
+    Imports are local to avoid circular imports because algorithm modules import
+    BenchmarkConfig from this file.
     """
     algorithm = job["algorithm"]
     cfg = job["cfg"]
