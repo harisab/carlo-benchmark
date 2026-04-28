@@ -34,13 +34,13 @@ from matplotlib.figure import Figure
 
 from odmr.project_defaults import (
     APP_DEFAULTS,
+    BENCHMARK_DEFAULTS,
     SIMULATION_DEFAULTS,
     TRUTH_COLOR,
-    BenchmarkConfig,
     build_jobs_from_rows,
     build_row_specs,
-    default_template_height,
-    get_algorithm_spec_map,
+    make_benchmark_config,
+    plot_color_for_index,
     record_key,
     row_key,
     run_algorithm_job,
@@ -204,7 +204,6 @@ class MainWindow(QMainWindow):
 
         self.records_by_key: dict[str, dict[str, Any]] = {}
         self.all_records: list[dict[str, Any]] = []
-        self.algorithm_specs = get_algorithm_spec_map()
 
         self._worker_thread: QThread | None = None
         self._worker: BenchmarkWorker | None = None
@@ -329,8 +328,8 @@ class MainWindow(QMainWindow):
         g = QGroupBox("Benchmark config")
         form = QFormLayout(g)
 
-        defaults = BenchmarkConfig(
-            template_height=default_template_height(float(self.ds_p.value()))
+        defaults = make_benchmark_config(
+            success_probability_at_resonance=float(self.ds_p.value())
         )
 
         self.ds_standard_width = QDoubleSpinBox()
@@ -356,7 +355,18 @@ class MainWindow(QMainWindow):
         self.ds_template_height = QDoubleSpinBox()
         self.ds_template_height.setRange(0.0, 10.0)
         self.ds_template_height.setDecimals(6)
-        self.ds_template_height.setValue(default_template_height(float(self.ds_p.value())))
+        self.ds_template_height.setValue(defaults.template_height)
+
+        self.ck_template_height_from_success_prob = QCheckBox()
+        self.ck_template_height_from_success_prob.setChecked(
+            bool(BENCHMARK_DEFAULTS["use_success_probability_for_template_height"])
+        )
+        self.ds_template_height.setEnabled(
+            not self.ck_template_height_from_success_prob.isChecked()
+        )
+        self.ck_template_height_from_success_prob.toggled.connect(
+            self._on_template_height_rule_changed
+        )
 
         self.sp_center_step = QSpinBox()
         self.sp_center_step.setRange(1, 100)
@@ -371,6 +381,7 @@ class MainWindow(QMainWindow):
         form.addRow("max_width", self.ds_max_width)
         form.addRow("width_step", self.ds_width_step)
         form.addRow("template_height", self.ds_template_height)
+        form.addRow("template_height = success_prob", self.ck_template_height_from_success_prob)
         form.addRow("center_step_bins", self.sp_center_step)
         form.addRow("require_one_peak_per_side", self.cmb_require_side)
 
@@ -442,18 +453,38 @@ class MainWindow(QMainWindow):
             "seed": int(self.sp_seed.value()),
         }
 
-    def _base_cfg(self) -> BenchmarkConfig:
-        return BenchmarkConfig(
+    def _base_cfg(self):
+        if self.current_truth is not None:
+            success_prob = float(self.current_truth["success_probability_at_resonance"])
+        else:
+            success_prob = float(self.ds_p.value())
+
+        return make_benchmark_config(
+            success_probability_at_resonance=success_prob,
+            template_height=float(self.ds_template_height.value()),
+            use_success_probability_for_template_height=(
+                self.ck_template_height_from_success_prob.isChecked()
+            ),
             min_width=float(self.ds_min_width.value()),
             max_width=float(self.ds_max_width.value()),
             width_step=float(self.ds_width_step.value()),
             standard_width=float(self.ds_standard_width.value()),
-            width_mode="scan",
-            template_height=float(self.ds_template_height.value()),
-            normalization_mode="raw",
             center_step_bins=int(self.sp_center_step.value()),
             require_one_peak_per_side=(self.cmb_require_side.currentText() == "true"),
         )
+
+    def _on_template_height_rule_changed(self, checked: bool) -> None:
+        self.ds_template_height.setEnabled(not checked)
+
+        if checked:
+            if self.current_truth is not None:
+                value = float(self.current_truth["success_probability_at_resonance"])
+            else:
+                value = float(self.ds_p.value())
+
+            self.ds_template_height.setValue(value)
+
+        self._rebuild_main_table()
 
     def _append_status(self, text: str) -> None:
         self.txt_status.appendPlainText(text)
@@ -481,10 +512,9 @@ class MainWindow(QMainWindow):
                 default_center = True
                 default_wave = False
             else:
-                algo_defaults = self.algorithm_specs[spec["algorithm"]]
-                default_run = algo_defaults.default_run
-                default_center = algo_defaults.default_show_center
-                default_wave = algo_defaults.default_show_wave
+                default_run = True
+                default_center = False
+                default_wave = False
 
             self.row_run_states[key] = old_run.get(key, default_run)
             self.row_center_states[key] = old_center.get(key, default_center)
@@ -543,6 +573,21 @@ class MainWindow(QMainWindow):
     def _update_records(self, records: list[dict[str, Any]]) -> None:
         self.records_by_key = {record_key(r["algorithm"], r["variant"]): r for r in records}
 
+    def _record_color(self, algorithm: str, variant: str) -> str:
+        target = record_key(algorithm, variant)
+        color_index = 0
+
+        for spec in self.row_specs:
+            if spec["kind"] != "variant":
+                continue
+
+            if record_key(spec["algorithm"], spec["variant"]) == target:
+                return plot_color_for_index(color_index)
+
+            color_index += 1
+
+        return plot_color_for_index(0)
+
     def _update_error_chart(self) -> None:
         ax = self.canvas_err.ax
         ax.clear()
@@ -569,9 +614,10 @@ class MainWindow(QMainWindow):
 
         labels = [f"{r['algorithm']} | {r['variant']}" for r in ordered]
         values = [r["mean_err"] for r in ordered]
+        colors = [self._record_color(r["algorithm"], r["variant"]) for r in ordered]
 
         y = np.arange(len(values))
-        ax.barh(y, values)
+        ax.barh(y, values, color=colors)
         ax.set_yticks(y)
         ax.set_yticklabels(labels, fontsize=8)
         ax.invert_yaxis()
@@ -609,11 +655,13 @@ class MainWindow(QMainWindow):
                     ax.axvline(float(truth["resonance_value1"]), linestyle="--", linewidth=1.8, color=TRUTH_COLOR, label="truth f1")
                     ax.axvline(float(truth["resonance_value2"]), linestyle="--", linewidth=1.8, color=TRUTH_COLOR, label="truth f2")
                 if show_wave:
+                    truth_gamma = float(truth["width"])
                     y_truth = two_peak_dip(
                         x,
                         float(truth["resonance_value1"]),
                         float(truth["resonance_value2"]),
-                        float(truth["width"]),
+                        truth_gamma,
+                        truth_gamma,
                         contrast,
                     )
                     ax.plot(x, y_truth, linewidth=2.0, color=TRUTH_COLOR, label="truth wave")
@@ -626,7 +674,7 @@ class MainWindow(QMainWindow):
                 continue
 
             result = rec["result"]
-            color = self.algorithm_specs[algo_name].color
+            color = self._record_color(algo_name, variant)
 
             if show_center:
                 ax.axvline(float(result["f1_hat"]), linestyle=":", linewidth=1.8, color=color, label=f"{algo_name} {variant} f1")
@@ -637,15 +685,18 @@ class MainWindow(QMainWindow):
                     ax.plot(x, np.asarray(result["best_fit"], dtype=float), linewidth=2.0, color=color, label=f"{algo_name} {variant} wave")
                 else:
                     if "gamma_left" in result:
-                        gamma = 0.5 * (float(result["gamma_left"]) + float(result["gamma_right"]))
+                        gamma_left = float(result["gamma_left"])
+                        gamma_right = float(result["gamma_right"])
                     else:
-                        gamma = float(result["gamma"])
+                        gamma_left = float(result["gamma"])
+                        gamma_right = float(result["gamma"])
 
                     y_model = two_peak_dip(
                         x,
                         float(result["f1_hat"]),
                         float(result["f2_hat"]),
-                        gamma,
+                        gamma_left,
+                        gamma_right,
                         contrast,
                     )
                     ax.plot(x, y_model, linewidth=2.0, color=color, label=f"{algo_name} {variant} wave")
@@ -757,7 +808,9 @@ class MainWindow(QMainWindow):
         self.all_records = []
 
         self.sp_seed.setValue(min(self.sp_seed.maximum(), used_seed + 1))
-        self.ds_template_height.setValue(default_template_height(truth["success_probability_at_resonance"]))
+
+        if self.ck_template_height_from_success_prob.isChecked():
+            self.ds_template_height.setValue(float(truth["success_probability_at_resonance"]))
 
         self.lbl_truth.setText(
             "Truth: "
@@ -772,7 +825,8 @@ class MainWindow(QMainWindow):
         self._append_status("Generated trace.")
         self._append_status(
             f"Truth | f1={truth['resonance_value1']:.3f} MHz, "
-            f"f2={truth['resonance_value2']:.3f} MHz, width={truth['width']:.3f}, seed={used_seed}"
+            f"f2={truth['resonance_value2']:.3f} MHz, "
+            f"width={truth['width']:.3f}, seed={used_seed}"
         )
         self._rebuild_main_table()
         self._plot_current_trace()

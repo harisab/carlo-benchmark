@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Any, Iterable
 
+
+# =============================================================================
+# Simulation defaults
+# =============================================================================
 
 SIMULATION_DEFAULTS = {
-    "num_points": 199,
+    # Faithful to the original legacy generator.
+    "num_points": 200,
     "num_tries": 20,
     "range_start": 3000.0,
     "range_end": 4000.0,
@@ -16,23 +22,10 @@ SIMULATION_DEFAULTS = {
     "seed": 123,
 }
 
-BENCHMARK_DEFAULTS = {
-    "min_width": 10.0,
-    "max_width": 50.0,
-    "width_step": 1.0,
-    "standard_width": 20.0,
-    "width_mode": "scan",
-    "normalization_mode": "raw",
-    "center_step_bins": 1,
-    "require_one_peak_per_side": True,
-}
 
-APP_DEFAULTS = {
-    "window_title": "ODMR Correlation GUI",
-    "bar_order": "best_first",
-    "graph_splitter_sizes": [950, 650],
-    "bottom_splitter_sizes": [1600, 400],
-}
+# =============================================================================
+# Benchmark defaults
+# =============================================================================
 
 NORMALIZATION_MODES = (
     "raw",
@@ -44,78 +37,160 @@ NORMALIZATION_MODES = (
 )
 
 WIDTH_MODES = (
-    "scan",
     "fixed",
+    "scan",
 )
+
+BENCHMARK_DEFAULTS = {
+    "min_width": 10.0,
+    "max_width": 50.0,
+    "width_step": 1.0,
+    "standard_width": 30.0,
+    "template_height": SIMULATION_DEFAULTS["success_probability_at_resonance"],
+    "use_success_probability_for_template_height": True,
+    "center_step_bins": 1,
+    "require_one_peak_per_side": True,
+}
+
+
+# =============================================================================
+# App defaults
+# =============================================================================
+
+APP_DEFAULTS = {
+    "window_title": "ODMR Algorithm Benchmark GUI",
+    "bar_order": "table_order",
+    "graph_splitter_sizes": [950, 650],
+    "bottom_splitter_sizes": [1600, 400],
+}
 
 TRUTH_COLOR = "limegreen"
 
+# Colors are not married to specific algorithms.
+# The GUI assigns them by table/row order as needed.
+PLOT_COLORS = (
+    "magenta",
+    "orange",
+    "gold",
+    "cyan",
+    "tab:blue",
+    "tab:green",
+    "tab:red",
+    "tab:purple",
+    "tab:brown",
+    "tab:pink",
+    "tab:gray",
+    "tab:olive",
+)
+
+
+# =============================================================================
+# Concrete config passed to algorithms
+# =============================================================================
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
+    """
+    Concrete benchmark configuration passed to algorithms.
+
+    Important:
+    - width_mode is always concrete: "fixed" or "scan".
+    - normalization_mode is always concrete:
+      raw/l1/l2/demean/demean_l1/demean_l2.
+    - All variant expansion happens in build_row_specs().
+    """
+
     min_width: float = float(BENCHMARK_DEFAULTS["min_width"])
     max_width: float = float(BENCHMARK_DEFAULTS["max_width"])
     width_step: float = float(BENCHMARK_DEFAULTS["width_step"])
     standard_width: float = float(BENCHMARK_DEFAULTS["standard_width"])
-    width_mode: str = str(BENCHMARK_DEFAULTS["width_mode"])
-    template_height: float = float(SIMULATION_DEFAULTS["success_probability_at_resonance"])
-    normalization_mode: str = str(BENCHMARK_DEFAULTS["normalization_mode"])
+    template_height: float = float(BENCHMARK_DEFAULTS["template_height"])
+
+    width_mode: str = WIDTH_MODES[0]
+    normalization_mode: str = NORMALIZATION_MODES[0]
+
     center_step_bins: int = int(BENCHMARK_DEFAULTS["center_step_bins"])
     require_one_peak_per_side: bool = bool(BENCHMARK_DEFAULTS["require_one_peak_per_side"])
 
 
-@dataclass(frozen=True)
-class AlgorithmSpec:
-    key: str
-    display_name: str
-    color: str
-    family: str  # "standalone" or "correlation_variants"
-    standalone_variant_name: str | None = None
-    default_run: bool = True
-    default_show_center: bool = False
-    default_show_wave: bool = False
+def resolve_template_height(
+    *,
+    success_probability_at_resonance: float | None,
+    template_height: float,
+    use_success_probability_for_template_height: bool,
+) -> float:
+    """
+    Decide template height from the central rule.
+
+    If use_success_probability_for_template_height is True, template height
+    follows the trace's success probability.
+
+    If False, the manually provided template_height is used.
+    """
+    if use_success_probability_for_template_height:
+        if success_probability_at_resonance is None:
+            return float(BENCHMARK_DEFAULTS["template_height"])
+        return float(success_probability_at_resonance)
+
+    return float(template_height)
 
 
-ALGORITHM_SPECS: list[AlgorithmSpec] = [
-    AlgorithmSpec(
-        key="LMFitSinglePerSide",
-        display_name="LMFitSinglePerSide",
-        color="magenta",
-        family="standalone",
-        standalone_variant_name="lmfit_single_side",
+def make_benchmark_config(
+    *,
+    success_probability_at_resonance: float | None = None,
+    template_height: float = float(BENCHMARK_DEFAULTS["template_height"]),
+    use_success_probability_for_template_height: bool = bool(
+        BENCHMARK_DEFAULTS["use_success_probability_for_template_height"]
     ),
-    AlgorithmSpec(
-        key="LMFitDoubleJoint",
-        display_name="LMFitDoubleJoint",
-        color="orange",
-        family="standalone",
-        standalone_variant_name="lmfit_double_joint",
-    ),
-    AlgorithmSpec(
-        key="SingleCorrelation",
-        display_name="SingleCorrelation",
-        color="gold",
-        family="correlation_variants",
-    ),
-    AlgorithmSpec(
-        key="DoubleCorrelation",
-        display_name="DoubleCorrelation",
-        color="cyan",
-        family="correlation_variants",
-    ),
-]
+    min_width: float = float(BENCHMARK_DEFAULTS["min_width"]),
+    max_width: float = float(BENCHMARK_DEFAULTS["max_width"]),
+    width_step: float = float(BENCHMARK_DEFAULTS["width_step"]),
+    standard_width: float = float(BENCHMARK_DEFAULTS["standard_width"]),
+    center_step_bins: int = int(BENCHMARK_DEFAULTS["center_step_bins"]),
+    require_one_peak_per_side: bool = bool(BENCHMARK_DEFAULTS["require_one_peak_per_side"]),
+) -> BenchmarkConfig:
+    """
+    Build a concrete base config from project defaults and optional runtime inputs.
+
+    Correlation variants are expanded later by build_row_specs().
+    """
+    resolved_template_height = resolve_template_height(
+        success_probability_at_resonance=success_probability_at_resonance,
+        template_height=template_height,
+        use_success_probability_for_template_height=use_success_probability_for_template_height,
+    )
+
+    return BenchmarkConfig(
+        min_width=float(min_width),
+        max_width=float(max_width),
+        width_step=float(width_step),
+        standard_width=float(standard_width),
+        template_height=float(resolved_template_height),
+        center_step_bins=int(center_step_bins),
+        require_one_peak_per_side=bool(require_one_peak_per_side),
+    )
 
 
-def get_algorithm_specs() -> list[AlgorithmSpec]:
-    return list(ALGORITHM_SPECS)
+# =============================================================================
+# Explicit benchmark design
+# =============================================================================
 
+BENCHMARK_ALGORITHMS = (
+    "LMFitSinglePerSide",
+    "LMFitDoubleJoint",
+    "SingleCorrelation",
+    "DoubleCorrelation",
+)
 
-def get_algorithm_spec_map() -> dict[str, AlgorithmSpec]:
-    return {spec.key: spec for spec in ALGORITHM_SPECS}
+STANDALONE_VARIANTS = {
+    "LMFitSinglePerSide": "lmfit_single_side",
+    "LMFitDoubleJoint": "lmfit_double_joint",
+}
 
-
-def default_template_height(success_probability_at_resonance: float) -> float:
-    return float(success_probability_at_resonance)
+CORRELATION_ALGORITHMS = (
+    "SingleCorrelation",
+    "DoubleCorrelation",
+)
 
 
 def variant_label(cfg: BenchmarkConfig) -> str:
@@ -123,7 +198,17 @@ def variant_label(cfg: BenchmarkConfig) -> str:
 
 
 def all_correlation_variants(base_cfg: BenchmarkConfig) -> list[BenchmarkConfig]:
+    """
+    Build all concrete correlation variants.
+
+    This always expands across:
+    - NORMALIZATION_MODES
+    - WIDTH_MODES
+
+    No algorithm receives "all".
+    """
     variants: list[BenchmarkConfig] = []
+
     for normalization_mode in NORMALIZATION_MODES:
         for width_mode in WIDTH_MODES:
             variants.append(
@@ -133,41 +218,84 @@ def all_correlation_variants(base_cfg: BenchmarkConfig) -> list[BenchmarkConfig]
                     width_mode=width_mode,
                 )
             )
+
     return variants
 
 
-def build_row_specs(base_cfg: BenchmarkConfig) -> list[dict]:
-    rows: list[dict] = [{"kind": "truth"}]
+def build_row_specs(
+    base_cfg: BenchmarkConfig,
+    *,
+    algorithm_keys: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Build table rows / benchmark rows.
 
-    for spec in ALGORITHM_SPECS:
-        if spec.family == "standalone":
+    By default:
+    - truth row
+    - lmfit single-side
+    - lmfit double-joint
+    - all SingleCorrelation variants
+    - all DoubleCorrelation variants
+
+    If algorithm_keys is passed, only those algorithms are included.
+    """
+    selected = set(algorithm_keys) if algorithm_keys is not None else None
+
+    rows: list[dict[str, Any]] = [{"kind": "truth"}]
+
+    if selected is None or "LMFitSinglePerSide" in selected:
+        rows.append(
+            {
+                "kind": "variant",
+                "algorithm": "LMFitSinglePerSide",
+                "variant": STANDALONE_VARIANTS["LMFitSinglePerSide"],
+                "cfg": base_cfg,
+            }
+        )
+
+    if selected is None or "LMFitDoubleJoint" in selected:
+        rows.append(
+            {
+                "kind": "variant",
+                "algorithm": "LMFitDoubleJoint",
+                "variant": STANDALONE_VARIANTS["LMFitDoubleJoint"],
+                "cfg": base_cfg,
+            }
+        )
+
+    if selected is None or "SingleCorrelation" in selected:
+        for cfg in all_correlation_variants(base_cfg):
             rows.append(
                 {
                     "kind": "variant",
-                    "algorithm": spec.key,
-                    "variant": str(spec.standalone_variant_name),
-                    "cfg": base_cfg,
+                    "algorithm": "SingleCorrelation",
+                    "variant": variant_label(cfg),
+                    "cfg": cfg,
                 }
             )
-        elif spec.family == "correlation_variants":
-            for cfg in all_correlation_variants(base_cfg):
-                rows.append(
-                    {
-                        "kind": "variant",
-                        "algorithm": spec.key,
-                        "variant": variant_label(cfg),
-                        "cfg": cfg,
-                    }
-                )
-        else:
-            raise ValueError(f"Unsupported family: {spec.family}")
+
+    if selected is None or "DoubleCorrelation" in selected:
+        for cfg in all_correlation_variants(base_cfg):
+            rows.append(
+                {
+                    "kind": "variant",
+                    "algorithm": "DoubleCorrelation",
+                    "variant": variant_label(cfg),
+                    "cfg": cfg,
+                }
+            )
 
     return rows
 
 
-def row_key(spec: dict) -> str:
+# =============================================================================
+# Row/job helpers
+# =============================================================================
+
+def row_key(spec: dict[str, Any]) -> str:
     if spec["kind"] == "truth":
         return "truth"
+
     return f"variant:{spec['algorithm']}:{spec['variant']}"
 
 
@@ -175,8 +303,23 @@ def record_key(algorithm: str, variant: str) -> str:
     return f"{algorithm}:{variant}"
 
 
-def build_jobs_from_rows(row_specs: list[dict], row_run_states: dict[str, bool]) -> list[dict]:
-    jobs: list[dict] = []
+def default_row_run_states(row_specs: list[dict[str, Any]]) -> dict[str, bool]:
+    """
+    Default script behavior:
+    - do not run truth row
+    - run every algorithm/variant row
+    """
+    return {
+        row_key(spec): spec["kind"] == "variant"
+        for spec in row_specs
+    }
+
+
+def build_jobs_from_rows(
+    row_specs: list[dict[str, Any]],
+    row_run_states: dict[str, bool],
+) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
 
     for spec in row_specs:
         if spec["kind"] != "variant":
@@ -193,7 +336,21 @@ def build_jobs_from_rows(row_specs: list[dict], row_run_states: dict[str, bool])
     return jobs
 
 
-def run_algorithm_job(job: dict, x, y_dip) -> dict:
+def plot_color_for_index(index: int) -> str:
+    return PLOT_COLORS[index % len(PLOT_COLORS)]
+
+
+# =============================================================================
+# Algorithm dispatch
+# =============================================================================
+
+def run_algorithm_job(job: dict[str, Any], x, y_dip) -> dict:
+    """
+    Run one benchmark job.
+
+    Imports are local to avoid circular imports:
+    algorithm modules import BenchmarkConfig from this file.
+    """
     algorithm = job["algorithm"]
     cfg = job["cfg"]
 

@@ -61,6 +61,7 @@ def run_double_correlation(
         best_f1,
         best_f2,
         best_gamma,
+        best_gamma,
         float(cfg.template_height),
     )
 

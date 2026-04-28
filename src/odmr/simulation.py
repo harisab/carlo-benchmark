@@ -39,11 +39,12 @@ def generate_random_odmr_trace(
 
     x = np.linspace(range_start, range_end, num_points, dtype=float)
 
-    offset = float(rng.uniform(0.0, offset_max))
+    left_offset = float(rng.integers(0, int(offset_max) + 1))
+    right_offset = float(rng.integers(0, int(offset_max) + 1))
     gamma = float(rng.integers(width_min, width_max + 1))
 
-    resonance_value1 = float(center_frequency - offset)
-    resonance_value2 = float(center_frequency + offset)
+    resonance_value1 = float(center_frequency - left_offset)
+    resonance_value2 = float(center_frequency + right_offset)
 
     probs = lorentzian_peak(x, resonance_value1, gamma, success_probability_at_resonance)
     probs += lorentzian_peak(x, resonance_value2, gamma, success_probability_at_resonance)
@@ -58,7 +59,8 @@ def generate_random_odmr_trace(
         "width": gamma,
         "num_tries": int(num_tries),
         "success_probability_at_resonance": float(success_probability_at_resonance),
-        "offset": offset,
+        "left_offset": left_offset,
+        "right_offset": right_offset,
         "center_frequency": float(center_frequency),
         "seed": int(seed),
     }

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import argparse
+
 from odmr.simulation import generate_random_odmr_trace
 from odmr.project_defaults import (
+    BENCHMARK_ALGORITHMS,
     SIMULATION_DEFAULTS,
-    BenchmarkConfig,
     build_jobs_from_rows,
     build_row_specs,
-    default_template_height,
+    default_row_run_states,
+    make_benchmark_config,
     run_algorithm_job,
 )
 
@@ -38,24 +41,48 @@ def print_result(label: str, result: dict, truth: dict) -> None:
     print()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run one ODMR benchmark trace.")
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=int(SIMULATION_DEFAULTS["seed"]),
+        help="Simulation random seed.",
+    )
+
+    parser.add_argument(
+        "--algorithms",
+        nargs="*",
+        default=None,
+        choices=BENCHMARK_ALGORITHMS,
+        help=(
+            "Optional algorithm subset. "
+            "If omitted, all algorithms and all correlation variants are run."
+        ),
+    )
+
+    return parser.parse_args()
+
+
 def main() -> None:
-    x, y_dip, truth = generate_random_odmr_trace(seed=int(SIMULATION_DEFAULTS["seed"]))
+    args = parse_args()
+
+    x, y_dip, truth = generate_random_odmr_trace(seed=args.seed)
 
     print("Truth")
     print(f"  f1        = {truth['resonance_value1']:.3f} MHz")
     print(f"  f2        = {truth['resonance_value2']:.3f} MHz")
     print(f"  width     = {truth['width']:.3f} MHz")
+    print(f"  seed      = {truth['seed']}")
     print()
 
-    base_cfg = BenchmarkConfig(
-        template_height=default_template_height(truth["success_probability_at_resonance"])
+    base_cfg = make_benchmark_config(
+        success_probability_at_resonance=float(truth["success_probability_at_resonance"])
     )
 
-    row_specs = build_row_specs(base_cfg)
-    row_run_states = {
-        ("truth" if spec["kind"] == "truth" else f"variant:{spec['algorithm']}:{spec['variant']}"): spec["kind"] == "variant"
-        for spec in row_specs
-    }
+    row_specs = build_row_specs(base_cfg, algorithm_keys=args.algorithms)
+    row_run_states = default_row_run_states(row_specs)
     jobs = build_jobs_from_rows(row_specs, row_run_states)
 
     for job in jobs:

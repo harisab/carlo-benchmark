@@ -10,7 +10,7 @@ from odmr.algorithms.common import (
     process_vector,
     split_left_right_indices,
     template_score,
-    two_peak_dip_asymmetric,
+    two_peak_dip,
 )
 
 
@@ -77,7 +77,7 @@ def run_single_correlation(
         cfg.normalization_mode,
     )
 
-    best_fit = two_peak_dip_asymmetric(
+    best_fit = two_peak_dip(
         x,
         f1_hat,
         f2_hat,

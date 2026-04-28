@@ -19,19 +19,6 @@ def two_peak_dip(
     x: np.ndarray,
     f1: float,
     f2: float,
-    gamma: float,
-    height: float,
-) -> np.ndarray:
-    return 1.0 - (
-        lorentzian_peak(x, f1, gamma, height)
-        + lorentzian_peak(x, f2, gamma, height)
-    )
-
-
-def two_peak_dip_asymmetric(
-    x: np.ndarray,
-    f1: float,
-    f2: float,
     gamma_left: float,
     gamma_right: float,
     height: float,
