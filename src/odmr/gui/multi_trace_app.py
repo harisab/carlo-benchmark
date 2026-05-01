@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import time
 from typing import Any
 
@@ -10,6 +11,8 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -97,7 +100,7 @@ def apply_modern_dark(app) -> None:
         }
         QPushButton:hover { background: rgba(255,255,255,0.10); }
         QPushButton:disabled { color: rgba(255,255,255,0.30); }
-        QSpinBox, QComboBox, QTableWidget {
+        QSpinBox, QDoubleSpinBox, QComboBox, QTableWidget {
             padding: 6px;
             border-radius: 8px;
             border: 1px solid rgba(255,255,255,0.10);
@@ -145,7 +148,12 @@ def _mean_std(values: list[float]) -> tuple[float, float]:
     return mean, std
 
 
-def _run_case(case: dict[str, Any], x: np.ndarray, y_dip: np.ndarray, settings: dict[str, Any]) -> dict:
+def _run_case(
+    case: dict[str, Any],
+    x: np.ndarray,
+    y_dip: np.ndarray,
+    settings: dict[str, Any],
+) -> dict:
     algorithm = case["algorithm"]
 
     if algorithm == "LMFitSinglePerSide":
@@ -176,6 +184,7 @@ class MultiTraceWorker(QObject):
         cases: list[dict[str, Any]],
         num_traces: int,
         start_seed: int,
+        simulation_kwargs: dict[str, Any],
         template_height_success_prob: bool,
         require_one_peak_per_side: bool,
     ) -> None:
@@ -183,6 +192,7 @@ class MultiTraceWorker(QObject):
         self.cases = cases
         self.num_traces = int(num_traces)
         self.start_seed = int(start_seed)
+        self.simulation_kwargs = dict(simulation_kwargs)
         self.template_height_success_prob = bool(template_height_success_prob)
         self.require_one_peak_per_side = bool(require_one_peak_per_side)
         self._cancel_requested = False
@@ -273,7 +283,10 @@ class MultiTraceWorker(QObject):
                     return
 
                 seed = self.start_seed + trace_idx
-                x, y_dip, truth = generate_random_odmr_trace(seed=seed)
+                x, y_dip, truth = generate_random_odmr_trace(
+                    seed=seed,
+                    **self.simulation_kwargs,
+                )
 
                 for case in self.cases:
                     if self._cancel_requested:
@@ -345,7 +358,8 @@ class MainWindow(QMainWindow):
         top = QWidget()
         top_layout = QHBoxLayout(top)
 
-        top_layout.addWidget(self._build_controls_group())
+        top_layout.addWidget(self._build_run_controls_group())
+        top_layout.addWidget(self._build_simulation_group())
         top_layout.addWidget(self._build_actions_group())
         top_layout.addWidget(self._build_case_group(), stretch=1)
 
@@ -364,7 +378,7 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
 
-    def _build_controls_group(self) -> QGroupBox:
+    def _build_run_controls_group(self) -> QGroupBox:
         g = QGroupBox("Benchmark run")
         form = QFormLayout(g)
 
@@ -394,13 +408,76 @@ class MainWindow(QMainWindow):
 
         return g
 
+    def _build_simulation_group(self) -> QGroupBox:
+        g = QGroupBox("Simulation settings")
+        form = QFormLayout(g)
+
+        self.sp_num_points = QSpinBox()
+        self.sp_num_points.setRange(3, 100000)
+        self.sp_num_points.setValue(int(SIMULATION_DEFAULTS["num_points"]))
+
+        self.sp_num_tries = QSpinBox()
+        self.sp_num_tries.setRange(1, 100000)
+        self.sp_num_tries.setValue(int(SIMULATION_DEFAULTS["num_tries"]))
+
+        self.ds_range_start = QDoubleSpinBox()
+        self.ds_range_start.setRange(-1e9, 1e9)
+        self.ds_range_start.setDecimals(3)
+        self.ds_range_start.setValue(float(SIMULATION_DEFAULTS["range_start"]))
+
+        self.ds_range_end = QDoubleSpinBox()
+        self.ds_range_end.setRange(-1e9, 1e9)
+        self.ds_range_end.setDecimals(3)
+        self.ds_range_end.setValue(float(SIMULATION_DEFAULTS["range_end"]))
+
+        self.ds_center_frequency = QDoubleSpinBox()
+        self.ds_center_frequency.setRange(-1e9, 1e9)
+        self.ds_center_frequency.setDecimals(3)
+        self.ds_center_frequency.setValue(float(SIMULATION_DEFAULTS["center_frequency"]))
+
+        self.ds_offset_max = QDoubleSpinBox()
+        self.ds_offset_max.setRange(0.0, 1e9)
+        self.ds_offset_max.setDecimals(3)
+        self.ds_offset_max.setValue(float(SIMULATION_DEFAULTS["offset_max"]))
+
+        self.sp_width_min = QSpinBox()
+        self.sp_width_min.setRange(1, 100000)
+        self.sp_width_min.setValue(int(SIMULATION_DEFAULTS["width_min"]))
+
+        self.sp_width_max = QSpinBox()
+        self.sp_width_max.setRange(1, 100000)
+        self.sp_width_max.setValue(int(SIMULATION_DEFAULTS["width_max"]))
+
+        self.ds_success_probability = QDoubleSpinBox()
+        self.ds_success_probability.setRange(1e-6, 0.99)
+        self.ds_success_probability.setDecimals(6)
+        self.ds_success_probability.setSingleStep(0.01)
+        self.ds_success_probability.setValue(
+            float(SIMULATION_DEFAULTS["success_probability_at_resonance"])
+        )
+
+        form.addRow("num_points", self.sp_num_points)
+        form.addRow("num_tries", self.sp_num_tries)
+        form.addRow("range_start", self.ds_range_start)
+        form.addRow("range_end", self.ds_range_end)
+        form.addRow("center_frequency", self.ds_center_frequency)
+        form.addRow("offset_max", self.ds_offset_max)
+        form.addRow("width_min", self.sp_width_min)
+        form.addRow("width_max", self.sp_width_max)
+        form.addRow("success_probability", self.ds_success_probability)
+
+        return g
+
     def _build_actions_group(self) -> QGroupBox:
         g = QGroupBox("Actions")
         layout = QVBoxLayout(g)
 
         self.btn_run = QPushButton("Run checked cases")
         self.btn_cancel = QPushButton("Cancel")
+        self.btn_export_summary = QPushButton("Export summary CSV")
+
         self.btn_cancel.setEnabled(False)
+        self.btn_export_summary.setEnabled(False)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
@@ -410,11 +487,13 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.btn_run)
         layout.addWidget(self.btn_cancel)
+        layout.addWidget(self.btn_export_summary)
         layout.addWidget(self.progress)
         layout.addWidget(self.lbl_status)
 
         self.btn_run.clicked.connect(self._on_run)
         self.btn_cancel.clicked.connect(self._on_cancel)
+        self.btn_export_summary.clicked.connect(self._on_export_summary_csv)
 
         return g
 
@@ -444,6 +523,19 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.tbl_cases)
         return g
+
+    def _simulation_kwargs(self) -> dict[str, Any]:
+        return {
+            "num_points": int(self.sp_num_points.value()),
+            "num_tries": int(self.sp_num_tries.value()),
+            "range_start": float(self.ds_range_start.value()),
+            "range_end": float(self.ds_range_end.value()),
+            "center_frequency": float(self.ds_center_frequency.value()),
+            "offset_max": float(self.ds_offset_max.value()),
+            "width_min": int(self.sp_width_min.value()),
+            "width_max": int(self.sp_width_max.value()),
+            "success_probability_at_resonance": float(self.ds_success_probability.value()),
+        }
 
     def _build_case_table(self) -> None:
         self.row_specs = []
@@ -504,6 +596,26 @@ class MainWindow(QMainWindow):
     def _set_running_ui(self, running: bool) -> None:
         self.btn_run.setEnabled(not running)
         self.btn_cancel.setEnabled(running)
+        self.btn_export_summary.setEnabled((not running) and bool(self.stats_by_key))
+
+    def _validate_simulation_settings(self) -> bool:
+        if self.ds_range_end.value() <= self.ds_range_start.value():
+            QMessageBox.warning(
+                self,
+                "Invalid simulation settings",
+                "range_end must be greater than range_start.",
+            )
+            return False
+
+        if self.sp_width_max.value() < self.sp_width_min.value():
+            QMessageBox.warning(
+                self,
+                "Invalid simulation settings",
+                "width_max must be greater than or equal to width_min.",
+            )
+            return False
+
+        return True
 
     def _on_run(self) -> None:
         cases = self._checked_cases()
@@ -512,12 +624,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No cases selected", "Check at least one benchmark case.")
             return
 
+        if not self._validate_simulation_settings():
+            return
+
         if self._worker_thread is not None:
             QMessageBox.information(self, "Busy", "A benchmark run is already in progress.")
             return
 
         self.stats_by_key = {}
         self.history_by_key = {}
+        self.btn_export_summary.setEnabled(False)
 
         for row in range(self.tbl_cases.rowCount()):
             for col in range(3, 10):
@@ -537,6 +653,7 @@ class MainWindow(QMainWindow):
             cases=cases,
             num_traces=num_traces,
             start_seed=start_seed,
+            simulation_kwargs=self._simulation_kwargs(),
             template_height_success_prob=self.ck_template_height_success_prob.isChecked(),
             require_one_peak_per_side=(self.cmb_require_side.currentText() == "true"),
         )
@@ -576,11 +693,13 @@ class MainWindow(QMainWindow):
     def _on_finished(self, snapshot: dict[str, Any]) -> None:
         self._apply_snapshot(snapshot)
         self.lbl_status.setText(f"Done | traces={snapshot['trace_done']}")
+        self.btn_export_summary.setEnabled(bool(self.stats_by_key))
 
     @Slot(object)
     def _on_cancelled(self, snapshot: dict[str, Any]) -> None:
         self._apply_snapshot(snapshot)
         self.lbl_status.setText(f"Cancelled | traces={snapshot['trace_done']}")
+        self.btn_export_summary.setEnabled(bool(self.stats_by_key))
 
     @Slot(str)
     def _on_error(self, msg: str) -> None:
@@ -704,6 +823,78 @@ class MainWindow(QMainWindow):
 
         self.canvas_line.figure.tight_layout()
         self.canvas_line.draw_idle()
+
+    def _on_export_summary_csv(self) -> None:
+        if not self.stats_by_key:
+            QMessageBox.information(self, "No data", "Run a benchmark first.")
+            return
+
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Export summary CSV",
+            "odmr_multi_trace_summary.csv",
+            "CSV Files (*.csv)",
+        )
+
+        if not path:
+            return
+
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+
+        records = [
+            self.stats_by_key[spec["key"]]
+            for spec in self.row_specs
+            if spec["key"] in self.stats_by_key and self.stats_by_key[spec["key"]]["n"] > 0
+        ]
+
+        records = sorted(records, key=lambda r: (r["mean_err"], r["algorithm"], r["variant"]))
+
+        fieldnames = [
+            "algorithm",
+            "variant",
+            "n",
+            "mean_err",
+            "std_err",
+            "median_err",
+            "best_err",
+            "worst_err",
+            "avg_runtime_ms",
+        ]
+
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+
+                for rec in records:
+                    writer.writerow(
+                        {
+                            "algorithm": rec["algorithm"],
+                            "variant": rec["variant"],
+                            "n": rec["n"],
+                            "mean_err": rec["mean_err"],
+                            "std_err": rec["std_err"],
+                            "median_err": rec["median_err"],
+                            "best_err": rec["best_err"],
+                            "worst_err": rec["worst_err"],
+                            "avg_runtime_ms": rec["avg_runtime_ms"],
+                        }
+                    )
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Export failed",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Saved summary CSV:\n{path}",
+        )
 
     def closeEvent(self, event) -> None:
         if self._worker is not None:

@@ -8,7 +8,7 @@ from __future__ import annotations
 SIMULATION_DEFAULTS = {
     # Faithful to the original legacy generator.
     "num_points": 200,
-    "num_tries": 4,
+    "num_tries": 20,
     "range_start": 3000.0,
     "range_end": 4000.0,
     "center_frequency": 3500.0,
