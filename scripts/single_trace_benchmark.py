@@ -7,13 +7,14 @@ from odmr.algorithms.double_correlation import run_double_correlation
 from odmr.algorithms.lmfit_double import run_lmfit_double_joint
 from odmr.algorithms.lmfit_single_side import run_lmfit_single_side
 from odmr.algorithms.single_correlation import run_single_correlation
+from odmr.simulation import generate_random_odmr_trace
+from odmr.algorithms.paper_ca import run_paper_ca_clean, run_paper_ca_verbatim
 from odmr.project_defaults import (
     BENCHMARK_ALGORITHM_NAMES,
     BENCHMARK_CASES,
     BENCHMARK_DEFAULTS,
     SIMULATION_DEFAULTS,
 )
-from odmr.simulation import generate_random_odmr_trace
 
 
 def mean_error(result: dict, truth: dict) -> tuple[float, float, float]:
@@ -117,6 +118,12 @@ def run_case(case: dict[str, Any], x, y_dip, settings: dict[str, Any]) -> dict:
 
     if algorithm == "DoubleCorrelation":
         return run_double_correlation(x, y_dip, settings=settings)
+    
+    if algorithm == "PaperCA_Verbatim":
+        return run_paper_ca_verbatim(x, y_dip, settings=settings)
+
+    if algorithm == "PaperCA_Clean":
+        return run_paper_ca_clean(x, y_dip, settings=settings)
 
     raise ValueError(f"Unsupported algorithm: {algorithm}")
 

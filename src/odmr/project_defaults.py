@@ -37,6 +37,10 @@ BENCHMARK_DEFAULTS = {
 
     "center_step_bins": 1,
     "require_one_peak_per_side": True,
+
+    "paper_ca_k_y": 4,
+    "paper_ca_max_iter": 300,
+    "paper_ca_random_state": 0,
 }
 
 
@@ -225,6 +229,18 @@ BENCHMARK_CASES = (
         "variant": "demean_l2_scan",
         "normalization_mode": "demean_l2",
         "width_mode": "scan",
+    },
+    {
+        "algorithm": "PaperCA_Verbatim",
+        "variant": "paper_ca_verbatim",
+        "normalization_mode": None,
+        "width_mode": None,
+    },
+    {
+        "algorithm": "PaperCA_Clean",
+        "variant": "paper_ca_clean",
+        "normalization_mode": None,
+        "width_mode": None,
     },
 )
 

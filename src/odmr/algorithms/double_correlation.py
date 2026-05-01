@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from odmr.project_defaults import BENCHMARK_DEFAULTS
 from odmr.algorithms.common import (
+    merged_settings,
     candidate_widths,
     lorentzian_peak,
     peak_space,
@@ -13,21 +13,13 @@ from odmr.algorithms.common import (
     two_peak_dip,
 )
 
-
-def _settings(settings: dict | None) -> dict:
-    out = dict(BENCHMARK_DEFAULTS)
-    if settings is not None:
-        out.update(settings)
-    return out
-
-
 def run_double_correlation(
     x: np.ndarray,
     y_dip: np.ndarray,
     *,
     settings: dict | None = None,
 ) -> dict:
-    cfg = _settings(settings)
+    cfg = merged_settings(settings)
 
     x = np.asarray(x, dtype=float)
     y_dip = np.asarray(y_dip, dtype=float)

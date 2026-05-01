@@ -37,6 +37,8 @@ from odmr.algorithms.double_correlation import run_double_correlation
 from odmr.algorithms.lmfit_double import run_lmfit_double_joint
 from odmr.algorithms.lmfit_single_side import run_lmfit_single_side
 from odmr.algorithms.single_correlation import run_single_correlation
+from odmr.simulation import generate_random_odmr_trace
+from odmr.algorithms.paper_ca import run_paper_ca_clean, run_paper_ca_verbatim
 from odmr.project_defaults import (
     APP_DEFAULTS,
     BENCHMARK_CASES,
@@ -44,8 +46,6 @@ from odmr.project_defaults import (
     SIMULATION_DEFAULTS,
     TRUTH_COLOR,
 )
-from odmr.simulation import generate_random_odmr_trace
-
 
 PLOT_COLORS = (
     "magenta",
@@ -184,6 +184,12 @@ class BenchmarkWorker(QObject):
 
         if algorithm == "DoubleCorrelation":
             return run_double_correlation(self.x, self.y_dip, settings=settings)
+        
+        if algorithm == "PaperCA_Verbatim":
+            return run_paper_ca_verbatim(self.x, self.y_dip, settings=settings)
+
+        if algorithm == "PaperCA_Clean":
+            return run_paper_ca_clean(self.x, self.y_dip, settings=settings)
 
         raise ValueError(f"Unsupported algorithm: {algorithm}")
 

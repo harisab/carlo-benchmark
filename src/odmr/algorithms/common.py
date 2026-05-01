@@ -1,8 +1,30 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from odmr.project_defaults import BENCHMARK_DEFAULTS
+
+
+def merged_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """
+    Merge per-run settings with BENCHMARK_DEFAULTS.
+
+    This replaces the repeated _settings(...) helper that was previously copied
+    into every algorithm file.
+    """
+    out = dict(BENCHMARK_DEFAULTS)
+
+    # These are case-level settings, not global benchmark defaults.
+    out.setdefault("width_mode", "fixed")
+    out.setdefault("normalization_mode", "raw")
+    out.setdefault("benchmark_variant", "default")
+
+    if settings is not None:
+        out.update(settings)
+
+    return out
 
 
 def lorentzian_peak(
@@ -41,15 +63,8 @@ def split_left_right_indices(n: int, step: int = 1) -> tuple[np.ndarray, np.ndar
     return left, right
 
 
-def _settings(settings: dict | None) -> dict:
-    out = dict(BENCHMARK_DEFAULTS)
-    if settings is not None:
-        out.update(settings)
-    return out
-
-
-def candidate_widths(settings: dict | None) -> np.ndarray:
-    cfg = _settings(settings)
+def candidate_widths(settings: dict[str, Any] | None) -> np.ndarray:
+    cfg = merged_settings(settings)
     width_mode = str(cfg["width_mode"])
 
     if width_mode == "fixed":
@@ -111,3 +126,14 @@ def process_vector(v: np.ndarray, normalization_mode: str) -> np.ndarray:
 
 def template_score(signal_processed: np.ndarray, template_processed: np.ndarray) -> float:
     return float(np.dot(signal_processed, template_processed))
+
+
+def y_dip_to_counts_like(y_dip: np.ndarray) -> np.ndarray:
+    """
+    Convert dip-space normalized ODMR data back into peak/count-like data.
+
+    Dylan's CA clusters vertical count/PL values and chooses the lowest cluster.
+    In our dip-space representation, valleys are low y_dip values, so y_dip
+    itself is already appropriate for lowest-cluster selection.
+    """
+    return np.asarray(y_dip, dtype=float)

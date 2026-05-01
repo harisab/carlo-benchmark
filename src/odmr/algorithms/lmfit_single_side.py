@@ -3,16 +3,7 @@ from __future__ import annotations
 import numpy as np
 from lmfit import Model
 
-from odmr.project_defaults import BENCHMARK_DEFAULTS
-from odmr.algorithms.common import split_left_right_indices
-
-
-def _settings(settings: dict | None) -> dict:
-    out = dict(BENCHMARK_DEFAULTS)
-    if settings is not None:
-        out.update(settings)
-    return out
-
+from odmr.algorithms.common import merged_settings, split_left_right_indices
 
 def single_lorentzian_dip(
     x: np.ndarray,
@@ -61,7 +52,7 @@ def run_lmfit_single_side(
     *,
     settings: dict | None = None,
 ) -> dict:
-    cfg = _settings(settings)
+    cfg = merged_settings(settings)
 
     x = np.asarray(x, dtype=float)
     y_dip = np.asarray(y_dip, dtype=float)

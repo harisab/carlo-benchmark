@@ -36,6 +36,7 @@ from matplotlib.figure import Figure
 from odmr.algorithms.double_correlation import run_double_correlation
 from odmr.algorithms.lmfit_double import run_lmfit_double_joint
 from odmr.algorithms.lmfit_single_side import run_lmfit_single_side
+from odmr.algorithms.paper_ca import run_paper_ca_clean, run_paper_ca_verbatim
 from odmr.algorithms.single_correlation import run_single_correlation
 from odmr.project_defaults import (
     APP_DEFAULTS,
@@ -144,7 +145,13 @@ def _mean_std(values: list[float]) -> tuple[float, float]:
 
     arr = np.asarray(values, dtype=float)
     mean = float(np.mean(arr))
-    std = float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.0
+
+    # Use population std for the GUI benchmark summary.
+    # This keeps the +std bracket intuitive for small n.
+    # For n=2, mean + std reaches the worse of the two values instead of
+    # extending beyond the observed range as sample std would.
+    std = float(np.std(arr, ddof=0)) if len(arr) > 1 else 0.0
+
     return mean, std
 
 
@@ -161,6 +168,12 @@ def _run_case(
 
     if algorithm == "LMFitDoubleJoint":
         return run_lmfit_double_joint(x, y_dip, settings=settings)
+
+    if algorithm == "PaperCA_Verbatim":
+        return run_paper_ca_verbatim(x, y_dip, settings=settings)
+
+    if algorithm == "PaperCA_Clean":
+        return run_paper_ca_clean(x, y_dip, settings=settings)
 
     if algorithm == "SingleCorrelation":
         return run_single_correlation(x, y_dip, settings=settings)
@@ -269,6 +282,10 @@ class MultiTraceWorker(QObject):
             total_jobs = max(1, self.num_traces * len(self.cases))
             completed_jobs = 0
 
+            # Throttle updates so the GUI stays responsive during long runs.
+            progress_emit_every = max(1, total_jobs // 1000)
+            stats_emit_every = max(1, self.num_traces // 200)
+
             errors_by_key: dict[str, list[float]] = {_case_key(case): [] for case in self.cases}
             runtimes_by_key: dict[str, list[float]] = {_case_key(case): [] for case in self.cases}
 
@@ -313,18 +330,23 @@ class MultiTraceWorker(QObject):
                     runtimes_by_key[key].append(float(runtime_ms))
 
                     completed_jobs += 1
-                    self.progress.emit(
-                        completed_jobs,
-                        total_jobs,
-                        f"trace {trace_idx + 1}/{self.num_traces} | {case['algorithm']} | {case['variant']}",
-                    )
 
-                snapshot = self._snapshot(
-                    trace_done=trace_idx + 1,
-                    errors_by_key=errors_by_key,
-                    runtimes_by_key=runtimes_by_key,
-                )
-                self.stats_updated.emit(snapshot)
+                    if completed_jobs % progress_emit_every == 0 or completed_jobs == total_jobs:
+                        self.progress.emit(
+                            completed_jobs,
+                            total_jobs,
+                            f"trace {trace_idx + 1}/{self.num_traces} | "
+                            f"{case['algorithm']} | {case['variant']}",
+                        )
+
+                trace_done = trace_idx + 1
+                if trace_done % stats_emit_every == 0 or trace_done == self.num_traces:
+                    snapshot = self._snapshot(
+                        trace_done=trace_done,
+                        errors_by_key=errors_by_key,
+                        runtimes_by_key=runtimes_by_key,
+                    )
+                    self.stats_updated.emit(snapshot)
 
             snapshot = self._snapshot(
                 trace_done=self.num_traces,
@@ -346,7 +368,9 @@ class MainWindow(QMainWindow):
         self.row_specs: list[dict[str, Any]] = []
         self.row_run_states: dict[str, bool] = {}
         self.stats_by_key: dict[str, dict[str, Any]] = {}
-        self.history_by_key: dict[str, list[tuple[int, float]]] = {}
+
+        # key -> list of (trace_done, running_mean_err, running_median_err)
+        self.history_by_key: dict[str, list[tuple[int, float, float]]] = {}
 
         self._worker_thread: QThread | None = None
         self._worker: MultiTraceWorker | None = None
@@ -360,11 +384,12 @@ class MainWindow(QMainWindow):
 
         top_layout.addWidget(self._build_run_controls_group())
         top_layout.addWidget(self._build_simulation_group())
+        top_layout.addWidget(self._build_plot_options_group())
         top_layout.addWidget(self._build_actions_group())
         top_layout.addWidget(self._build_case_group(), stretch=1)
 
         self.canvas_bar = MplCanvas("Mean error by benchmark case")
-        self.canvas_line = MplCanvas("Running mean error")
+        self.canvas_line = MplCanvas("Running error")
 
         graph_splitter = QSplitter(Qt.Horizontal)
         graph_splitter.addWidget(self.canvas_bar)
@@ -465,6 +490,39 @@ class MainWindow(QMainWindow):
         form.addRow("width_min", self.sp_width_min)
         form.addRow("width_max", self.sp_width_max)
         form.addRow("success_probability", self.ds_success_probability)
+
+        return g
+
+    def _build_plot_options_group(self) -> QGroupBox:
+        g = QGroupBox("Plot options")
+        form = QFormLayout(g)
+
+        self.cmb_bar_order = QComboBox()
+        self.cmb_bar_order.addItems(["table_order", "best_first"])
+        self.cmb_bar_order.setCurrentText(str(APP_DEFAULTS.get("bar_order", "table_order")))
+        self.cmb_bar_order.currentIndexChanged.connect(lambda _idx: self._update_bar_chart())
+
+        self.ck_show_median_marker = QCheckBox()
+        self.ck_show_median_marker.setChecked(False)
+        self.ck_show_median_marker.toggled.connect(lambda _checked: self._update_bar_chart())
+
+        self.ck_show_std_bracket = QCheckBox()
+        self.ck_show_std_bracket.setChecked(False)
+        self.ck_show_std_bracket.toggled.connect(lambda _checked: self._update_bar_chart())
+
+        self.ck_center_bar_mean = QCheckBox()
+        self.ck_center_bar_mean.setChecked(False)
+        self.ck_center_bar_mean.toggled.connect(lambda _checked: self._update_bar_chart())
+
+        self.ck_running_median = QCheckBox()
+        self.ck_running_median.setChecked(False)
+        self.ck_running_median.toggled.connect(lambda _checked: self._update_line_chart())
+
+        form.addRow("bar order", self.cmb_bar_order)
+        form.addRow("show median line", self.ck_show_median_marker)
+        form.addRow("show +std bracket", self.ck_show_std_bracket)
+        form.addRow("center mean on x-axis", self.ck_center_bar_mean)
+        form.addRow("running median error", self.ck_running_median)
 
         return g
 
@@ -719,9 +777,17 @@ class MainWindow(QMainWindow):
             key = record["key"]
             self.stats_by_key[key] = record
 
-            if record["n"] > 0 and np.isfinite(record["mean_err"]):
+            if (
+                record["n"] > 0
+                and np.isfinite(record["mean_err"])
+                and np.isfinite(record["median_err"])
+            ):
                 self.history_by_key.setdefault(key, []).append(
-                    (trace_done, float(record["mean_err"]))
+                    (
+                        trace_done,
+                        float(record["mean_err"]),
+                        float(record["median_err"]),
+                    )
                 )
 
         self._update_table()
@@ -748,9 +814,59 @@ class MainWindow(QMainWindow):
             for offset, value in enumerate(values):
                 self.tbl_cases.setItem(row, 3 + offset, _table_item(value))
 
+    def _records_for_bar_chart(self) -> list[dict[str, Any]]:
+        records = [
+            self.stats_by_key[spec["key"]]
+            for spec in self.row_specs
+            if spec["key"] in self.stats_by_key and self.stats_by_key[spec["key"]]["n"] > 0
+        ]
+
+        if self.cmb_bar_order.currentText() == "best_first":
+            records = sorted(records, key=lambda r: (r["mean_err"], r["algorithm"], r["variant"]))
+
+        return records
+
     def _update_plots(self) -> None:
         self._update_bar_chart()
         self._update_line_chart()
+
+    def _draw_positive_std_bracket(
+        self,
+        ax,
+        *,
+        y_value: float,
+        mean_value: float,
+        std_value: float,
+    ) -> None:
+        """
+        Draw positive-only std.
+
+        It starts exactly at the mean, which is the right edge of the mean bar,
+        and extends only to mean + std.
+        """
+        if not np.isfinite(mean_value) or not np.isfinite(std_value):
+            return
+
+        if std_value <= 0.0:
+            return
+
+        x0 = float(mean_value)
+        x1 = float(mean_value + std_value)
+
+        cap_half_height = 0.22
+
+        ax.hlines(
+            y_value,
+            x0,
+            x1,
+            linewidth=1.4,
+        )
+        ax.vlines(
+            [x0, x1],
+            y_value - cap_half_height,
+            y_value + cap_half_height,
+            linewidth=1.4,
+        )
 
     def _update_bar_chart(self) -> None:
         ax = self.canvas_bar.ax
@@ -759,27 +875,51 @@ class MainWindow(QMainWindow):
         ax.set_xlabel("Mean error (MHz)")
         ax.set_ylabel("Case")
 
-        records = [
-            self.stats_by_key[spec["key"]]
-            for spec in self.row_specs
-            if spec["key"] in self.stats_by_key and self.stats_by_key[spec["key"]]["n"] > 0
-        ]
+        records = self._records_for_bar_chart()
 
         if not records:
             self.canvas_bar.draw_idle()
             return
 
-        records = sorted(records, key=lambda r: r["mean_err"])
-
         labels = [f"{r['algorithm']} | {r['variant']}" for r in records]
-        values = [r["mean_err"] for r in records]
+        means = np.asarray([float(r["mean_err"]) for r in records], dtype=float)
+        medians = np.asarray([float(r["median_err"]) for r in records], dtype=float)
+        stds = np.asarray([float(r["std_err"]) for r in records], dtype=float)
+
+        y = np.arange(len(means))
         colors = [_plot_color_for_index(i) for i in range(len(records))]
 
-        y = np.arange(len(values))
-        ax.barh(y, values, color=colors)
+        ax.barh(y, means, color=colors, alpha=0.85)
+
+        if self.ck_show_std_bracket.isChecked():
+            for yi, mean_value, std_value in zip(y, means, stds):
+                self._draw_positive_std_bracket(
+                    ax,
+                    y_value=float(yi),
+                    mean_value=float(mean_value),
+                    std_value=float(std_value),
+                )
+
+        if self.ck_show_median_marker.isChecked():
+            for yi, median_value in zip(y, medians):
+                if np.isfinite(median_value):
+                    ax.vlines(
+                        median_value,
+                        yi - 0.35,
+                        yi + 0.35,
+                        linewidth=2.0,
+                    )
+
         ax.set_yticks(y)
         ax.set_yticklabels(labels, fontsize=8)
         ax.invert_yaxis()
+
+        if self.ck_center_bar_mean.isChecked():
+            finite_means = means[np.isfinite(means)]
+            if len(finite_means) > 0:
+                center_value = float(np.mean(finite_means))
+                if center_value > 0:
+                    ax.set_xlim(0.0, 2.0 * center_value)
 
         self.canvas_bar.figure.tight_layout()
         self.canvas_bar.draw_idle()
@@ -787,21 +927,30 @@ class MainWindow(QMainWindow):
     def _update_line_chart(self) -> None:
         ax = self.canvas_line.ax
         ax.clear()
-        ax.set_title("Running mean error: current top cases")
+
+        use_median = self.ck_running_median.isChecked()
+        metric_name = "median_err" if use_median else "mean_err"
+        history_index = 2 if use_median else 1
+
+        ax.set_title(
+            "Running median error: current top cases"
+            if use_median
+            else "Running mean error: current top cases"
+        )
         ax.set_xlabel("Traces completed")
-        ax.set_ylabel("Mean error (MHz)")
+        ax.set_ylabel("Median error (MHz)" if use_median else "Mean error (MHz)")
 
         records = [
             rec
             for rec in self.stats_by_key.values()
-            if rec["n"] > 0 and np.isfinite(rec["mean_err"])
+            if rec["n"] > 0 and np.isfinite(rec[metric_name])
         ]
 
         if not records:
             self.canvas_line.draw_idle()
             return
 
-        top_records = sorted(records, key=lambda r: r["mean_err"])[:6]
+        top_records = sorted(records, key=lambda r: r[metric_name])[:6]
 
         for i, rec in enumerate(top_records):
             key = rec["key"]
@@ -810,7 +959,7 @@ class MainWindow(QMainWindow):
                 continue
 
             xs = [p[0] for p in history]
-            ys = [p[1] for p in history]
+            ys = [p[history_index] for p in history]
 
             ax.plot(
                 xs,
