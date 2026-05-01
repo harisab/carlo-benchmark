@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from odmr.project_defaults import BenchmarkConfig
+from odmr.project_defaults import BENCHMARK_DEFAULTS
 
 
 def lorentzian_peak(
@@ -41,19 +41,32 @@ def split_left_right_indices(n: int, step: int = 1) -> tuple[np.ndarray, np.ndar
     return left, right
 
 
-def candidate_widths(cfg: BenchmarkConfig) -> np.ndarray:
-    if cfg.width_mode == "fixed":
-        return np.array([float(cfg.standard_width)], dtype=float)
+def _settings(settings: dict | None) -> dict:
+    out = dict(BENCHMARK_DEFAULTS)
+    if settings is not None:
+        out.update(settings)
+    return out
 
-    widths = np.arange(
-        float(cfg.min_width),
-        float(cfg.max_width) + 0.5 * float(cfg.width_step),
-        float(cfg.width_step),
-        dtype=float,
-    )
-    if len(widths) == 0:
-        return np.array([float(cfg.standard_width)], dtype=float)
-    return widths
+
+def candidate_widths(settings: dict | None) -> np.ndarray:
+    cfg = _settings(settings)
+    width_mode = str(cfg["width_mode"])
+
+    if width_mode == "fixed":
+        return np.array([float(cfg["standard_width"])], dtype=float)
+
+    if width_mode == "scan":
+        widths = np.arange(
+            float(cfg["min_width"]),
+            float(cfg["max_width"]) + 0.5 * float(cfg["width_step"]),
+            float(cfg["width_step"]),
+            dtype=float,
+        )
+        if len(widths) == 0:
+            return np.array([float(cfg["standard_width"])], dtype=float)
+        return widths
+
+    raise ValueError(f"Unsupported width_mode: {width_mode}")
 
 
 def _safe_l1_normalize(v: np.ndarray) -> np.ndarray:

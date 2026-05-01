@@ -32,21 +32,35 @@ from PySide6.QtWidgets import (
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+from odmr.algorithms.common import two_peak_dip
+from odmr.algorithms.double_correlation import run_double_correlation
+from odmr.algorithms.lmfit_double import run_lmfit_double_joint
+from odmr.algorithms.lmfit_single_side import run_lmfit_single_side
+from odmr.algorithms.single_correlation import run_single_correlation
 from odmr.project_defaults import (
     APP_DEFAULTS,
+    BENCHMARK_CASES,
     BENCHMARK_DEFAULTS,
     SIMULATION_DEFAULTS,
     TRUTH_COLOR,
-    BenchmarkConfig,
-    build_jobs_from_rows,
-    build_row_specs,
-    plot_color_for_index,
-    record_key,
-    row_key,
-    run_algorithm_job,
 )
-from odmr.algorithms.common import two_peak_dip
 from odmr.simulation import generate_random_odmr_trace
+
+
+PLOT_COLORS = (
+    "magenta",
+    "orange",
+    "gold",
+    "cyan",
+    "tab:blue",
+    "tab:green",
+    "tab:red",
+    "tab:purple",
+    "tab:brown",
+    "tab:pink",
+    "tab:gray",
+    "tab:olive",
+)
 
 
 def apply_modern_dark(app) -> None:
@@ -119,6 +133,18 @@ def _table_item(text: str) -> QTableWidgetItem:
     return item
 
 
+def _case_key(case: dict[str, Any]) -> str:
+    return f"{case['algorithm']}:{case['variant']}"
+
+
+def _result_key(algorithm: str, variant: str) -> str:
+    return f"{algorithm}:{variant}"
+
+
+def _plot_color_for_index(index: int) -> str:
+    return PLOT_COLORS[index % len(PLOT_COLORS)]
+
+
 class BenchmarkWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(list)
@@ -143,6 +169,24 @@ class BenchmarkWorker(QObject):
     def cancel(self) -> None:
         self._cancel_requested = True
 
+    def _run_job(self, job: dict[str, Any]) -> dict:
+        algorithm = job["algorithm"]
+        settings = job["settings"]
+
+        if algorithm == "LMFitSinglePerSide":
+            return run_lmfit_single_side(self.x, self.y_dip, settings=settings)
+
+        if algorithm == "LMFitDoubleJoint":
+            return run_lmfit_double_joint(self.x, self.y_dip, settings=settings)
+
+        if algorithm == "SingleCorrelation":
+            return run_single_correlation(self.x, self.y_dip, settings=settings)
+
+        if algorithm == "DoubleCorrelation":
+            return run_double_correlation(self.x, self.y_dip, settings=settings)
+
+        raise ValueError(f"Unsupported algorithm: {algorithm}")
+
     @Slot()
     def run(self) -> None:
         try:
@@ -156,7 +200,7 @@ class BenchmarkWorker(QObject):
                     return
 
                 t0 = time.perf_counter()
-                result = run_algorithm_job(job, self.x, self.y_dip)
+                result = self._run_job(job)
                 runtime_ms = 1000.0 * (time.perf_counter() - t0)
 
                 e1 = abs(float(result["f1_hat"]) - float(self.truth["resonance_value1"]))
@@ -212,6 +256,8 @@ class MainWindow(QMainWindow):
         self.row_run_states: dict[str, bool] = {}
         self.row_center_states: dict[str, bool] = {}
         self.row_wave_states: dict[str, bool] = {}
+
+        self._manual_template_height = float(BENCHMARK_DEFAULTS["template_height"])
 
         self._build_ui()
         self._rebuild_main_table()
@@ -298,6 +344,7 @@ class MainWindow(QMainWindow):
         self.ds_p.setDecimals(6)
         self.ds_p.setSingleStep(0.01)
         self.ds_p.setValue(float(SIMULATION_DEFAULTS["success_probability_at_resonance"]))
+        self.ds_p.valueChanged.connect(lambda _value: self._on_success_probability_changed())
 
         self.ds_wmin = QSpinBox()
         self.ds_wmin.setRange(1, 100000)
@@ -328,53 +375,55 @@ class MainWindow(QMainWindow):
         g = QGroupBox("Benchmark config")
         form = QFormLayout(g)
 
-        defaults = BenchmarkConfig(
-            template_height=float(self.ds_p.value())
-        )
-
         self.ds_standard_width = QDoubleSpinBox()
         self.ds_standard_width.setRange(1e-6, 1e6)
         self.ds_standard_width.setDecimals(3)
-        self.ds_standard_width.setValue(defaults.standard_width)
+        self.ds_standard_width.setValue(float(BENCHMARK_DEFAULTS["standard_width"]))
 
         self.ds_min_width = QDoubleSpinBox()
         self.ds_min_width.setRange(1e-6, 1e6)
         self.ds_min_width.setDecimals(3)
-        self.ds_min_width.setValue(defaults.min_width)
+        self.ds_min_width.setValue(float(BENCHMARK_DEFAULTS["min_width"]))
 
         self.ds_max_width = QDoubleSpinBox()
         self.ds_max_width.setRange(1e-6, 1e6)
         self.ds_max_width.setDecimals(3)
-        self.ds_max_width.setValue(defaults.max_width)
+        self.ds_max_width.setValue(float(BENCHMARK_DEFAULTS["max_width"]))
 
         self.ds_width_step = QDoubleSpinBox()
         self.ds_width_step.setRange(1e-6, 1e6)
         self.ds_width_step.setDecimals(3)
-        self.ds_width_step.setValue(defaults.width_step)
+        self.ds_width_step.setValue(float(BENCHMARK_DEFAULTS["width_step"]))
 
         self.ds_template_height = QDoubleSpinBox()
         self.ds_template_height.setRange(0.0, 10.0)
         self.ds_template_height.setDecimals(6)
-        self.ds_template_height.setValue(defaults.template_height)
+        self.ds_template_height.setValue(self._manual_template_height)
+        self.ds_template_height.valueChanged.connect(
+            lambda value: self._on_manual_template_height_changed(float(value))
+        )
 
         self.ck_template_height_from_success_prob = QCheckBox()
         self.ck_template_height_from_success_prob.setChecked(
             bool(BENCHMARK_DEFAULTS["use_success_probability_for_template_height"])
         )
-        self.ds_template_height.setEnabled(
-            not self.ck_template_height_from_success_prob.isChecked()
-        )
         self.ck_template_height_from_success_prob.toggled.connect(
             self._on_template_height_rule_changed
         )
 
+        if self.ck_template_height_from_success_prob.isChecked():
+            self.ds_template_height.setValue(float(self.ds_p.value()))
+            self.ds_template_height.setEnabled(False)
+
         self.sp_center_step = QSpinBox()
         self.sp_center_step.setRange(1, 100)
-        self.sp_center_step.setValue(defaults.center_step_bins)
+        self.sp_center_step.setValue(int(BENCHMARK_DEFAULTS["center_step_bins"]))
 
         self.cmb_require_side = QComboBox()
         self.cmb_require_side.addItems(["true", "false"])
-        self.cmb_require_side.setCurrentText("true" if defaults.require_one_peak_per_side else "false")
+        self.cmb_require_side.setCurrentText(
+            "true" if bool(BENCHMARK_DEFAULTS["require_one_peak_per_side"]) else "false"
+        )
 
         form.addRow("standard_width", self.ds_standard_width)
         form.addRow("min_width", self.ds_min_width)
@@ -461,29 +510,96 @@ class MainWindow(QMainWindow):
 
         return float(self.ds_template_height.value())
 
-    def _base_cfg(self) -> BenchmarkConfig:
-        return BenchmarkConfig(
-            min_width=float(self.ds_min_width.value()),
-            max_width=float(self.ds_max_width.value()),
-            width_step=float(self.ds_width_step.value()),
-            standard_width=float(self.ds_standard_width.value()),
-            template_height=self._template_height_from_gui(),
-            center_step_bins=int(self.sp_center_step.value()),
-            require_one_peak_per_side=(self.cmb_require_side.currentText() == "true"),
+    def _settings_for_case(self, case: dict[str, Any]) -> dict[str, Any]:
+        settings = dict(BENCHMARK_DEFAULTS)
+        settings.update(
+            {
+                "min_width": float(self.ds_min_width.value()),
+                "max_width": float(self.ds_max_width.value()),
+                "width_step": float(self.ds_width_step.value()),
+                "standard_width": float(self.ds_standard_width.value()),
+                "template_height": self._template_height_from_gui(),
+                "center_step_bins": int(self.sp_center_step.value()),
+                "require_one_peak_per_side": (
+                    self.cmb_require_side.currentText() == "true"
+                ),
+                "normalization_mode": case["normalization_mode"] or "raw",
+                "width_mode": case["width_mode"] or "fixed",
+                "benchmark_variant": case["variant"],
+            }
         )
+        return settings
+
+    def _make_table_rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = [
+            {"kind": "truth", "key": "truth"}
+        ]
+
+        for case in BENCHMARK_CASES:
+            key = _case_key(case)
+            rows.append(
+                {
+                    "kind": "variant",
+                    "algorithm": case["algorithm"],
+                    "variant": case["variant"],
+                    "case": case,
+                    "settings": self._settings_for_case(case),
+                    "key": key,
+                }
+            )
+
+        return rows
+
+    def _selected_jobs(self) -> list[dict[str, Any]]:
+        jobs: list[dict[str, Any]] = []
+
+        for spec in self.row_specs:
+            if spec["kind"] != "variant":
+                continue
+
+            if self.row_run_states.get(spec["key"], False):
+                jobs.append(
+                    {
+                        "algorithm": spec["algorithm"],
+                        "settings": spec["settings"],
+                    }
+                )
+
+        return jobs
+
+    def _on_manual_template_height_changed(self, value: float) -> None:
+        if hasattr(self, "ck_template_height_from_success_prob"):
+            if not self.ck_template_height_from_success_prob.isChecked():
+                self._manual_template_height = float(value)
+
+    def _on_success_probability_changed(self) -> None:
+        if not hasattr(self, "ck_template_height_from_success_prob"):
+            return
+
+        if self.ck_template_height_from_success_prob.isChecked() and self.current_truth is None:
+            self.ds_template_height.setValue(float(self.ds_p.value()))
+            if hasattr(self, "tbl_main"):
+                self._rebuild_main_table()
 
     def _on_template_height_rule_changed(self, checked: bool) -> None:
-        self.ds_template_height.setEnabled(not checked)
-
         if checked:
+            if self.ds_template_height.isEnabled():
+                self._manual_template_height = float(self.ds_template_height.value())
+
             if self.current_truth is not None:
                 value = float(self.current_truth["success_probability_at_resonance"])
             else:
                 value = float(self.ds_p.value())
 
             self.ds_template_height.setValue(value)
+            self.ds_template_height.setEnabled(False)
 
-        self._rebuild_main_table()
+        else:
+            self.ds_template_height.setEnabled(True)
+            self.ds_template_height.setValue(self._manual_template_height)
+
+        if hasattr(self, "tbl_main"):
+            self._rebuild_main_table()
 
     def _append_status(self, text: str) -> None:
         self.txt_status.appendPlainText(text)
@@ -496,7 +612,7 @@ class MainWindow(QMainWindow):
         old_center = dict(self.row_center_states)
         old_wave = dict(self.row_wave_states)
 
-        self.row_specs = build_row_specs(self._base_cfg())
+        self.row_specs = self._make_table_rows()
 
         self.tbl_main.setRowCount(len(self.row_specs))
         self.row_run_states = {}
@@ -504,7 +620,7 @@ class MainWindow(QMainWindow):
         self.row_wave_states = {}
 
         for row, spec in enumerate(self.row_specs):
-            key = row_key(spec)
+            key = spec["key"]
 
             if spec["kind"] == "truth":
                 default_run = False
@@ -529,7 +645,7 @@ class MainWindow(QMainWindow):
         return ck
 
     def _populate_row(self, row: int, spec: dict[str, Any]) -> None:
-        key = row_key(spec)
+        key = spec["key"]
 
         run_enabled = spec["kind"] != "truth"
         run_ck = self._checkbox(self.row_run_states[key], run_enabled, lambda _s, k=key: self._on_run_checkbox_changed(k))
@@ -555,12 +671,10 @@ class MainWindow(QMainWindow):
             self.tbl_main.setItem(row, 11, _table_item(""))
             return
 
-        algo_name = spec["algorithm"]
-        variant = spec["variant"]
-        rec = self.records_by_key.get(record_key(algo_name, variant))
+        rec = self.records_by_key.get(spec["key"])
 
-        self.tbl_main.setItem(row, 0, _table_item(algo_name))
-        self.tbl_main.setItem(row, 1, _table_item(variant))
+        self.tbl_main.setItem(row, 0, _table_item(spec["algorithm"]))
+        self.tbl_main.setItem(row, 1, _table_item(spec["variant"]))
         self.tbl_main.setItem(row, 5, _table_item(f"{rec['f1_hat']:.3f}" if rec else ""))
         self.tbl_main.setItem(row, 6, _table_item(f"{rec['f2_hat']:.3f}" if rec else ""))
         self.tbl_main.setItem(row, 7, _table_item(rec["gamma_repr"] if rec else ""))
@@ -570,22 +684,24 @@ class MainWindow(QMainWindow):
         self.tbl_main.setItem(row, 11, _table_item(f"{rec['mean_err']:.3f}" if rec else ""))
 
     def _update_records(self, records: list[dict[str, Any]]) -> None:
-        self.records_by_key = {record_key(r["algorithm"], r["variant"]): r for r in records}
+        self.records_by_key = {
+            _result_key(r["algorithm"], r["variant"]): r
+            for r in records
+        }
 
-    def _record_color(self, algorithm: str, variant: str) -> str:
-        target = record_key(algorithm, variant)
+    def _record_color(self, key: str) -> str:
         color_index = 0
 
         for spec in self.row_specs:
             if spec["kind"] != "variant":
                 continue
 
-            if record_key(spec["algorithm"], spec["variant"]) == target:
-                return plot_color_for_index(color_index)
+            if spec["key"] == key:
+                return _plot_color_for_index(color_index)
 
             color_index += 1
 
-        return plot_color_for_index(0)
+        return _plot_color_for_index(0)
 
     def _update_error_chart(self) -> None:
         ax = self.canvas_err.ax
@@ -605,15 +721,18 @@ class MainWindow(QMainWindow):
             for spec in self.row_specs:
                 if spec["kind"] != "variant":
                     continue
-                rec = self.records_by_key.get(record_key(spec["algorithm"], spec["variant"]))
+                rec = self.records_by_key.get(spec["key"])
                 if rec is not None:
                     ordered.append(rec)
         else:
-            ordered = sorted(self.all_records, key=lambda r: (r["mean_err"], r["algorithm"], r["variant"]))
+            ordered = sorted(
+                self.all_records,
+                key=lambda r: (r["mean_err"], r["algorithm"], r["variant"]),
+            )
 
         labels = [f"{r['algorithm']} | {r['variant']}" for r in ordered]
         values = [r["mean_err"] for r in ordered]
-        colors = [self._record_color(r["algorithm"], r["variant"]) for r in ordered]
+        colors = [self._record_color(_result_key(r["algorithm"], r["variant"])) for r in ordered]
 
         y = np.arange(len(values))
         ax.barh(y, values, color=colors)
@@ -642,7 +761,7 @@ class MainWindow(QMainWindow):
         ax.scatter(x, y, s=12, label="data")
 
         for spec in self.row_specs:
-            key = row_key(spec)
+            key = spec["key"]
             show_center = self.row_center_states.get(key, False)
             show_wave = self.row_wave_states.get(key, False)
 
@@ -666,22 +785,20 @@ class MainWindow(QMainWindow):
                     ax.plot(x, y_truth, linewidth=2.0, color=TRUTH_COLOR, label="truth wave")
                 continue
 
-            algo_name = spec["algorithm"]
-            variant = spec["variant"]
-            rec = self.records_by_key.get(record_key(algo_name, variant))
+            rec = self.records_by_key.get(key)
             if rec is None:
                 continue
 
             result = rec["result"]
-            color = self._record_color(algo_name, variant)
+            color = self._record_color(key)
 
             if show_center:
-                ax.axvline(float(result["f1_hat"]), linestyle=":", linewidth=1.8, color=color, label=f"{algo_name} {variant} f1")
-                ax.axvline(float(result["f2_hat"]), linestyle=":", linewidth=1.8, color=color, label=f"{algo_name} {variant} f2")
+                ax.axvline(float(result["f1_hat"]), linestyle=":", linewidth=1.8, color=color, label=f"{spec['algorithm']} {spec['variant']} f1")
+                ax.axvline(float(result["f2_hat"]), linestyle=":", linewidth=1.8, color=color, label=f"{spec['algorithm']} {spec['variant']} f2")
 
             if show_wave:
                 if "best_fit" in result:
-                    ax.plot(x, np.asarray(result["best_fit"], dtype=float), linewidth=2.0, color=color, label=f"{algo_name} {variant} wave")
+                    ax.plot(x, np.asarray(result["best_fit"], dtype=float), linewidth=2.0, color=color, label=f"{spec['algorithm']} {spec['variant']} wave")
                 else:
                     if "gamma_left" in result:
                         gamma_left = float(result["gamma_left"])
@@ -698,7 +815,7 @@ class MainWindow(QMainWindow):
                         gamma_right,
                         contrast,
                     )
-                    ax.plot(x, y_model, linewidth=2.0, color=color, label=f"{algo_name} {variant} wave")
+                    ax.plot(x, y_model, linewidth=2.0, color=color, label=f"{spec['algorithm']} {spec['variant']} wave")
 
         ax.legend(fontsize=8, loc="best")
         self.canvas.draw_idle()
@@ -834,7 +951,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_run_selected(self) -> None:
         self._rebuild_main_table()
-        self._start_worker(build_jobs_from_rows(self.row_specs, self.row_run_states))
+        self._start_worker(self._selected_jobs())
 
     @Slot()
     def _on_cancel(self) -> None:
@@ -844,7 +961,7 @@ class MainWindow(QMainWindow):
 
     def _find_row_index(self, key: str) -> int | None:
         for idx, spec in enumerate(self.row_specs):
-            if row_key(spec) == key:
+            if spec["key"] == key:
                 return idx
         return None
 

@@ -3,18 +3,24 @@ from __future__ import annotations
 import numpy as np
 from lmfit import Model
 
-from odmr.project_defaults import BenchmarkConfig
+from odmr.project_defaults import BENCHMARK_DEFAULTS
 from odmr.algorithms.common import split_left_right_indices
+
+
+def _settings(settings: dict | None) -> dict:
+    out = dict(BENCHMARK_DEFAULTS)
+    if settings is not None:
+        out.update(settings)
+    return out
 
 
 def single_lorentzian_dip(
     x: np.ndarray,
-    baseline: float,
     amplitude: float,
     f0: float,
     gamma: float,
 ) -> np.ndarray:
-    return baseline - amplitude / (1.0 + ((x - f0) / gamma) ** 2)
+    return 1.0 - amplitude / (1.0 + ((x - f0) / gamma) ** 2)
 
 
 def _fit_one_side(
@@ -26,19 +32,16 @@ def _fit_one_side(
     gamma_max: float,
 ) -> tuple[object, dict[str, float]]:
     i0 = int(np.argmin(y_dip))
-    baseline0 = float(np.median(y_dip))
-    amp0 = float(max(1e-4, baseline0 - y_dip[i0]))
+    amp0 = float(max(1e-4, 1.0 - y_dip[i0]))
     f0_0 = float(x[i0])
 
     model = Model(single_lorentzian_dip)
     params = model.make_params(
-        baseline=baseline0,
         amplitude=amp0,
         f0=f0_0,
         gamma=gamma_init,
     )
 
-    params["baseline"].set(min=0.0, max=2.0)
     params["amplitude"].set(min=0.0, max=2.0)
     params["f0"].set(min=float(np.min(x)), max=float(np.max(x)))
     params["gamma"].set(min=float(gamma_min), max=float(gamma_max))
@@ -56,10 +59,9 @@ def run_lmfit_single_side(
     x: np.ndarray,
     y_dip: np.ndarray,
     *,
-    cfg: BenchmarkConfig | None = None,
+    settings: dict | None = None,
 ) -> dict:
-    if cfg is None:
-        cfg = BenchmarkConfig()
+    cfg = _settings(settings)
 
     x = np.asarray(x, dtype=float)
     y_dip = np.asarray(y_dip, dtype=float)
@@ -73,22 +75,22 @@ def run_lmfit_single_side(
     x_right = x[right_slice]
     y_right = y_dip[right_slice]
 
-    gamma0 = float(cfg.standard_width)
-    gamma0 = max(float(cfg.min_width), min(float(cfg.max_width), gamma0))
+    gamma0 = float(cfg["standard_width"])
+    gamma0 = max(float(cfg["min_width"]), min(float(cfg["max_width"]), gamma0))
 
     left_fit, left_best = _fit_one_side(
         x_left,
         y_left,
         gamma_init=gamma0,
-        gamma_min=float(cfg.min_width),
-        gamma_max=float(cfg.max_width),
+        gamma_min=float(cfg["min_width"]),
+        gamma_max=float(cfg["max_width"]),
     )
     right_fit, right_best = _fit_one_side(
         x_right,
         y_right,
         gamma_init=gamma0,
-        gamma_min=float(cfg.min_width),
-        gamma_max=float(cfg.max_width),
+        gamma_min=float(cfg["min_width"]),
+        gamma_max=float(cfg["max_width"]),
     )
 
     best_fit = np.empty_like(y_dip, dtype=float)
@@ -99,13 +101,13 @@ def run_lmfit_single_side(
 
     return {
         "name": "LMFitSinglePerSide",
-        "benchmark_variant": "lmfit_single_side",
+        "benchmark_variant": str(cfg.get("benchmark_variant", "lmfit_single_side")),
         "f1_hat": float(left_best["f0"]),
         "f2_hat": float(right_best["f0"]),
         "gamma_left": float(left_best["gamma"]),
         "gamma_right": float(right_best["gamma"]),
         "score": -chisqr_total,
-        "used_cfg": cfg,
+        "used_settings": cfg,
         "fit_success": bool(left_fit.success and right_fit.success),
         "fit_message": f"L:{left_fit.message} | R:{right_fit.message}",
         "chisqr": chisqr_total,
