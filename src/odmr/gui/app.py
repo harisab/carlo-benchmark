@@ -39,6 +39,7 @@ from odmr.algorithms.lmfit_single_side import run_lmfit_single_side
 from odmr.algorithms.single_correlation import run_single_correlation
 from odmr.simulation import generate_random_odmr_trace
 from odmr.algorithms.paper_ca import run_paper_ca_clean, run_paper_ca_verbatim
+from odmr.algorithms.double_mle import run_double_mle_approx, run_double_mle_exact
 from odmr.project_defaults import (
     APP_DEFAULTS,
     BENCHMARK_CASES,
@@ -178,6 +179,12 @@ class BenchmarkWorker(QObject):
 
         if algorithm == "LMFitDoubleJoint":
             return run_lmfit_double_joint(self.x, self.y_dip, settings=settings)
+        
+        if algorithm == "DoubleMLE_Exact":
+            return run_double_mle_exact(self.x, self.y_dip, settings=settings)
+
+        if algorithm == "DoubleMLE_Approx":
+            return run_double_mle_approx(self.x, self.y_dip, settings=settings)
 
         if algorithm == "SingleCorrelation":
             return run_single_correlation(self.x, self.y_dip, settings=settings)
@@ -520,6 +527,11 @@ class MainWindow(QMainWindow):
         settings = dict(BENCHMARK_DEFAULTS)
         settings.update(
             {
+                "num_tries": (
+                int(self.current_truth.get("num_tries", self.sp_tries.value()))
+                if self.current_truth is not None
+                else int(self.sp_tries.value())
+                ),
                 "min_width": float(self.ds_min_width.value()),
                 "max_width": float(self.ds_max_width.value()),
                 "width_step": float(self.ds_width_step.value()),

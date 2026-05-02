@@ -9,6 +9,7 @@ from odmr.algorithms.lmfit_single_side import run_lmfit_single_side
 from odmr.algorithms.single_correlation import run_single_correlation
 from odmr.simulation import generate_random_odmr_trace
 from odmr.algorithms.paper_ca import run_paper_ca_clean, run_paper_ca_verbatim
+from odmr.algorithms.double_mle import run_double_mle_approx, run_double_mle_exact
 from odmr.project_defaults import (
     BENCHMARK_ALGORITHM_NAMES,
     BENCHMARK_CASES,
@@ -88,6 +89,7 @@ def should_run(case: dict[str, Any], selected_algorithms: list[str] | None) -> b
 def settings_for_case(
     case: dict[str, Any],
     *,
+    truth: dict[str, Any],
     template_height: float,
     require_one_peak_per_side: bool,
 ) -> dict[str, Any]:
@@ -95,6 +97,7 @@ def settings_for_case(
     settings.update(
         {
             "template_height": float(template_height),
+            "num_tries": int(truth.get("num_tries", SIMULATION_DEFAULTS["num_tries"])),
             "require_one_peak_per_side": bool(require_one_peak_per_side),
             "normalization_mode": case["normalization_mode"] or "raw",
             "width_mode": case["width_mode"] or "fixed",
@@ -112,6 +115,12 @@ def run_case(case: dict[str, Any], x, y_dip, settings: dict[str, Any]) -> dict:
 
     if algorithm == "LMFitDoubleJoint":
         return run_lmfit_double_joint(x, y_dip, settings=settings)
+    
+    if algorithm == "DoubleMLE_Exact":
+        return run_double_mle_exact(x, y_dip, settings=settings)
+
+    if algorithm == "DoubleMLE_Approx":
+        return run_double_mle_approx(x, y_dip, settings=settings)
 
     if algorithm == "SingleCorrelation":
         return run_single_correlation(x, y_dip, settings=settings)
@@ -159,6 +168,7 @@ def main() -> None:
 
         settings = settings_for_case(
             case,
+            truth=truth,
             template_height=template_height,
             require_one_peak_per_side=args.require_one_peak_per_side,
         )

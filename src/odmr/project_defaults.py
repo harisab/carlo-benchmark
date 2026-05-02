@@ -83,6 +83,31 @@ BENCHMARK_CASES = (
         "width_mode": None,
     },
 
+        {
+        "algorithm": "DoubleMLE_Exact",
+        "variant": "mle_exact_fixed",
+        "normalization_mode": None,
+        "width_mode": "fixed",
+    },
+    {
+        "algorithm": "DoubleMLE_Exact",
+        "variant": "mle_exact_scan",
+        "normalization_mode": None,
+        "width_mode": "scan",
+    },
+    {
+        "algorithm": "DoubleMLE_Approx",
+        "variant": "mle_approx_fixed",
+        "normalization_mode": None,
+        "width_mode": "fixed",
+    },
+    {
+        "algorithm": "DoubleMLE_Approx",
+        "variant": "mle_approx_scan",
+        "normalization_mode": None,
+        "width_mode": "scan",
+    },
+
     # SingleCorrelation variants
     {
         "algorithm": "SingleCorrelation",

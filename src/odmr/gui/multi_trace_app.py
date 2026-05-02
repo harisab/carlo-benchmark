@@ -38,6 +38,7 @@ from odmr.algorithms.lmfit_double import run_lmfit_double_joint
 from odmr.algorithms.lmfit_single_side import run_lmfit_single_side
 from odmr.algorithms.paper_ca import run_paper_ca_clean, run_paper_ca_verbatim
 from odmr.algorithms.single_correlation import run_single_correlation
+from odmr.algorithms.double_mle import run_double_mle_approx, run_double_mle_exact
 from odmr.project_defaults import (
     APP_DEFAULTS,
     BENCHMARK_CASES,
@@ -168,6 +169,12 @@ def _run_case(
 
     if algorithm == "LMFitDoubleJoint":
         return run_lmfit_double_joint(x, y_dip, settings=settings)
+    
+    if algorithm == "DoubleMLE_Exact":
+        return run_double_mle_exact(x, y_dip, settings=settings)
+
+    if algorithm == "DoubleMLE_Approx":
+        return run_double_mle_approx(x, y_dip, settings=settings)
 
     if algorithm == "PaperCA_Verbatim":
         return run_paper_ca_verbatim(x, y_dip, settings=settings)
@@ -224,6 +231,12 @@ class MultiTraceWorker(QObject):
         settings.update(
             {
                 "template_height": template_height,
+                "num_tries": int(
+                    truth.get(
+                        "num_tries",
+                        self.simulation_kwargs.get("num_tries", SIMULATION_DEFAULTS["num_tries"]),
+                    )
+                ),
                 "require_one_peak_per_side": self.require_one_peak_per_side,
                 "normalization_mode": case["normalization_mode"] or "raw",
                 "width_mode": case["width_mode"] or "fixed",
